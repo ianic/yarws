@@ -33,7 +33,7 @@ impl Header {
                 "Sec-WebSocket-Extensions" => self.extensions = value.to_string(),
                 //"Host"
                 //"Origin"
-                _ => println!("other: '{}' => '{}'", key, value),
+                _ => (), // println!("other: '{}' => '{}'", key, value),
             }
         }
     }
@@ -50,11 +50,7 @@ fn parse_http_header(line: &str) -> Option<(&str, &str)> {
     let mut splitter = line.splitn(2, ':');
     let first = splitter.next()?;
     let second = splitter.next()?;
-    //println!("splitted to: {} :: {}", first, second);
     Some((first, second.trim()))
-    // for s in line.split(":") {
-    //     println!("split line part {0}", s);
-    // }
 }
 
 fn handle_connection(stream: TcpStream) -> io::Result<()> {
@@ -69,23 +65,6 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
             Ok(2) => break, // empty line \r\n = end of header line
             Ok(_n) => {
                 header.parse(&line);
-                // if let Some((key, value)) = inspect(&line) {
-                //     match key {
-                //         "Connection" => println!("connection header: {}", value),
-                //         "Upgrade" =>
-                //         "Sec-WebSocket-Version"
-                //         "Sec-WebSocket-Key"
-                //         "Sec-WebSocket-Extensions"
-                //         "Host"
-                //         "Origin"
-                //         _ => println!("other: '{}' => '{}'", key, value),
-                //     }
-                // }
-                // match inspect(&line) {
-                //     Some((key, value)) => println!("detected header: {} => {}", key, value),
-                //     None => (),
-                // }
-                //print!("{} {}", n, line);
             }
             _ => break,
         }
@@ -117,6 +96,8 @@ fn main() {
 }
 
 /*
+example of ws upgrade header:
+
 16 GET / HTTP/1.1
 22 Host: localhost:8000
 21 Connection: Upgrade

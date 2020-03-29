@@ -1,7 +1,13 @@
-// server2.rs
+// server.rs
+#[macro_use]
+extern crate hex_literal;
+
+use base64;
+use sha1::{Digest, Sha1};
 use std::io;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
+use std::str;
 
 #[derive(Debug)]
 struct Header {
@@ -69,10 +75,16 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
             _ => break,
         }
     }
-    println!("header: {:?}", header);
-    println!("is websocket upgrade: {}", header.is_ws_upgrade());
-    let rsp = "HTTP/1.1 200 OK\r\n\r\n{}";
-    ostream.write_all(rsp.as_bytes())?;
+
+    if header.is_ws_upgrade() {
+        let rsp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ".to_string() + &ws_accept(&header.key) + "\r\n\r\n";
+        ostream.write_all(rsp.as_bytes())?;
+    } else {
+        println!("header: {:?}", header);
+        println!("is websocket upgrade: {}", header.is_ws_upgrade());
+        let rsp = "HTTP/1.1 200 OK\r\n\r\n{}";
+        ostream.write_all(rsp.as_bytes())?;
+    }
     ostream.flush()?;
     Ok(())
 }
@@ -95,6 +107,46 @@ fn main() {
     }
 }
 
+const WS_MAGIC_KEY: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+fn ws_accept(key: &str) -> String {
+    let mut hasher = Sha1::new();
+    let s = key.to_string() + WS_MAGIC_KEY;
+
+    hasher.input(s.as_bytes());
+    let hr = hasher.result();
+    base64::encode(&hr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn sha1_general() {
+        let mut hasher = Sha1::new();
+        hasher.input(b"hello world");
+        let result = hasher.result();
+        assert_eq!(result[..], hex!("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed"));
+    }
+    #[test]
+    fn test_ws_accept() {
+        // example from the ws rfc: https://tools.ietf.org/html/rfc6455
+        /* NOTE: As an example, if the value of the |Sec-WebSocket-Key| header
+        field in the client's handshake were "dGhlIHNhbXBsZSBub25jZQ==", the
+        server would append the string "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        to form the string "dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-
+        C5AB0DC85B11".  The server would then take the SHA-1 hash of this
+        string, giving the value 0xb3 0x7a 0x4f 0x2c 0xc0 0x62 0x4f 0x16 0x90
+        0xf6 0x46 0x06 0xcf 0x38 0x59 0x45 0xb2 0xbe 0xc4 0xea.  This value
+        is then base64-encoded, to give the value
+        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", which would be returned in the
+        |Sec-WebSocket-Accept| header field.
+        */
+        let acc = ws_accept("dGhlIHNhbXBsZSBub25jZQ==");
+        assert_eq!(acc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+}
+
 /*
 example of ws upgrade header:
 
@@ -111,4 +163,18 @@ example of ws upgrade header:
 114 Accept-Language: en-US,en;q=0.9,de;q=0.8,et;q=0.7,hr;q=0.6,it;q=0.5,sk;q=0.4,sl;q=0.3,sr;q=0.2,bs;q=0.1,mt;q=0.1
 45 Sec-WebSocket-Key: HNDy4+PhhRtPmNt1Xet/Ew==
 70 Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+*/
+/*
+
+const socket = new WebSocket('ws://localhost:8000');
+socket.addEventListener('open', function (event) {
+    socket.send('Hello Server!');
+});
+socket.addEventListener('message', function (event) {
+    console.log('Message from server ', event.data);
+});
+socket.addEventListener('close', function (event) {
+    console.log('ws closed');
+});
+
 */

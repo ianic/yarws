@@ -1,6 +1,7 @@
 // server.rs
 use base64;
 use sha1::{Digest, Sha1};
+use std::convert::TryInto;
 use std::io;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
@@ -117,34 +118,43 @@ fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
     println!("ws written {} bytes", n);
     output.flush()?;
 
-    let mut buf = [0u8; 1024];
     loop {
+        let mut buf = [0u8; 2];
         let n = input.read(&mut buf)?;
-        if n == 0 {
-            println!("ws closed");
+        if n != 2 {
+            // TODO: error missing header
             break;
         }
-        if is_close(&buf) {
+        let mut h = WsHeader::new(buf[0], buf[1]);
+
+        let rn = h.read_next() as usize;
+        if rn > 0 {
+            let mut buf = vec![0u8; rn];
+            let n = input.read(&mut buf)?;
+            if n != rn {
+                // TODO: error missing header
+                break;
+            }
+            h.set_header(&buf);
+        }
+
+        let rn = h.payload_len as usize;
+        if h.payload_len > 0 {
+            let mut buf = vec![0u8; rn];
+            let n = input.read(&mut buf)?;
+            if n != rn {
+                // TODO: error missing header
+                break;
+            }
+            h.set_payload(&buf);
+            println!("ws body {} bytes, as str: {}", n, h.payload_str());
+        }
+
+        if h.is_close() {
             println!("ws close request recieved");
             output.write(close_frame().as_slice())?; // zasto ovdje zovem as_slice
             break;
         }
-        print!("ws received {} bytes ", n);
-        io::stdout().write(&buf)?;
-        io::stdout().flush()?;
-        println!()
-
-        // match input.read(&mut client_buffer) {
-        //     Ok(n) => {
-        //         if n == 0 {
-        //             return Ok(());
-        //         } else {
-        //             io::stdout().write(&client_buffer).unwrap();
-        //             io::stdout().flush().unwrap();
-        //         }
-        //     }
-        //     Err(error) => program.print_fail(error.to_string()),
-        // }
     }
 
     Ok(())
@@ -153,6 +163,76 @@ fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
 fn is_close(buf: &[u8]) -> bool {
     let msk = 0b0000_1111u8;
     buf[0] & msk == 0x8
+}
+
+struct WsHeader {
+    fin: bool,
+    rsv1: bool,
+    rsv2: bool,
+    rsv3: bool,
+    mask: bool,
+    opcode: u8,
+    payload_len: u64,
+    masking_key: [u8; 4],
+    payload: Vec<u8>,
+}
+
+impl WsHeader {
+    fn new(byte1: u8, byte2: u8) -> WsHeader {
+        WsHeader {
+            fin: byte1 & 0b1000_0000u8 != 0,
+            rsv1: byte1 & 0b0100_0000u8 != 0,
+            rsv2: byte1 & 0b0010_0000u8 != 0,
+            rsv3: byte1 & 0b0001_0000u8 != 0,
+            opcode: byte1 & 0b0000_1111u8,
+            mask: byte2 & 0b1000_0000u8 != 0,
+            payload_len: (byte2 & 0b0111_1111u8) as u64,
+            masking_key: [0; 4],
+            payload: vec![0; 0],
+        }
+    }
+    fn read_next(&self) -> u8 {
+        let mut n: u8 = if self.mask { 4 } else { 0 };
+        if self.payload_len >= 126 {
+            n += 2;
+        }
+        if self.payload_len == 127 {
+            n += 4;
+        }
+        n
+    }
+    fn set_header(&mut self, buf: &[u8]) {
+        let mask_start = buf.len() - 4;
+        if mask_start == 8 {
+            let bytes: [u8; 8] = [
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ];
+            self.payload_len = u64::from_be_bytes(bytes);
+        }
+        if mask_start == 2 {
+            let bytes: [u8; 2] = [buf[0], buf[1]];
+            self.payload_len = u16::from_be_bytes(bytes) as u64;
+        }
+        for i in 0..4 {
+            self.masking_key[i] = buf[mask_start + i];
+        }
+    }
+    fn set_payload(&mut self, buf: &[u8]) {
+        let mut decoded = vec![0u8; self.payload_len as usize];
+        for (i, b) in buf.iter().enumerate() {
+            decoded[i] = b ^ self.masking_key[i % 4];
+        }
+        self.payload = decoded;
+    }
+    fn payload_str(&self) -> &str {
+        match str::from_utf8(&self.payload) {
+            Ok(v) => v,
+            _ => "",
+        }
+    }
+    fn is_close(&self) -> bool {
+        self.opcode == 8
+    }
 }
 
 fn main() {

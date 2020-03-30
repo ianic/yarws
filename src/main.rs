@@ -1,7 +1,4 @@
 // server.rs
-#[macro_use]
-extern crate hex_literal;
-
 use base64;
 use sha1::{Digest, Sha1};
 use std::io;
@@ -51,7 +48,14 @@ impl Header {
             && self.key.len() > 0
     }
 }
-
+fn a_frame() -> Vec<u8> {
+    let mut buf = vec![0b10000001u8, 0b00000100u8];
+    for b in "pero".as_bytes() {
+        buf.push(*b);
+    }
+    //buf.append("pero".as_bytes());
+    buf
+}
 fn parse_http_header(line: &str) -> Option<(&str, &str)> {
     let mut splitter = line.splitn(2, ':');
     let first = splitter.next()?;
@@ -79,6 +83,7 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
     if header.is_ws_upgrade() {
         let rsp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ".to_string() + &ws_accept(&header.key) + "\r\n\r\n";
         ostream.write_all(rsp.as_bytes())?;
+        ostream.write(a_frame().as_slice())?;
     } else {
         println!("header: {:?}", header);
         println!("is websocket upgrade: {}", header.is_ws_upgrade());
@@ -119,6 +124,10 @@ fn ws_accept(key: &str) -> String {
 }
 
 #[cfg(test)]
+#[macro_use]
+extern crate hex_literal;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -144,6 +153,13 @@ mod tests {
         */
         let acc = ws_accept("dGhlIHNhbXBsZSBub25jZQ==");
         assert_eq!(acc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn test_frame() {
+        let mut buf = vec![0b10000001u8, 0b00000001u8];
+        buf.push("a".as_bytes()[0]);
+        println!("buf: {:?}", buf)
     }
 }
 

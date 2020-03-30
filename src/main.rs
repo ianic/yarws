@@ -36,7 +36,8 @@ impl Header {
                 "Sec-WebSocket-Extensions" => self.extensions = value.to_string(),
                 //"Host"
                 //"Origin"
-                _ => (), // println!("other: '{}' => '{}'", key, value),
+                _ => (),
+                //_ => println!("other header: '{}' => '{}'", key, value),
             }
         }
     }
@@ -56,6 +57,11 @@ fn a_frame() -> Vec<u8> {
     //buf.append("pero".as_bytes());
     buf
 }
+
+fn close_frame() -> Vec<u8> {
+    vec![0b1000_1000u8, 0b0000_0000u8]
+}
+
 fn parse_http_header(line: &str) -> Option<(&str, &str)> {
     let mut splitter = line.splitn(2, ':');
     let first = splitter.next()?;
@@ -63,17 +69,21 @@ fn parse_http_header(line: &str) -> Option<(&str, &str)> {
     Some((first, second.trim()))
 }
 
-fn handle_connection(stream: TcpStream) -> io::Result<()> {
-    let mut ostream = stream.try_clone()?;
-    let mut rdr = io::BufReader::new(stream);
+fn handle_connection(mut stream: TcpStream) -> io::Result<()> {
+    //println!("handle_connection");
+    //let mut ostream = stream.try_clone()?;
+    let mut rdr = io::BufReader::new(&stream);
 
     let mut header = Header::new();
     loop {
         let mut line = String::new();
+
+        // TODO: sta ako ovdje nikda nista ne posalje blokira mi thread !!!
         match rdr.read_line(&mut line) {
             Ok(0) => break, // eof
             Ok(2) => break, // empty line \r\n = end of header line
             Ok(_n) => {
+                //print!("line: {}", line);
                 header.parse(&line);
             }
             _ => break,
@@ -82,16 +92,67 @@ fn handle_connection(stream: TcpStream) -> io::Result<()> {
 
     if header.is_ws_upgrade() {
         let rsp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ".to_string() + &ws_accept(&header.key) + "\r\n\r\n";
-        ostream.write_all(rsp.as_bytes())?;
-        ostream.write(a_frame().as_slice())?;
+        stream.write_all(rsp.as_bytes())?;
+        stream.flush()?;
+        //ostream.write(a_frame().as_slice())?;
+        return handle_ws_connection(stream);
     } else {
-        println!("header: {:?}", header);
-        println!("is websocket upgrade: {}", header.is_ws_upgrade());
-        let rsp = "HTTP/1.1 200 OK\r\n\r\n{}";
-        ostream.write_all(rsp.as_bytes())?;
+        //println!("bad request");
+        //println!("header: {:?}", header);
+        //println!("is websocket upgrade: {}", header.is_ws_upgrade());
+        //let rsp = "HTTP/1.1 200 OK\r\n\r\n{}";
+        let rsp = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        stream.write_all(rsp.as_bytes())?;
+        stream.flush()?;
     }
-    ostream.flush()?;
     Ok(())
+}
+
+fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
+    println!("ws open");
+    let mut output = stream.try_clone()?;
+    let mut input = stream;
+
+    let n = output.write(a_frame().as_slice())?;
+    println!("ws written {} bytes", n);
+    output.flush()?;
+
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            println!("ws closed");
+            break;
+        }
+        if is_close(&buf) {
+            println!("ws close request recieved");
+            output.write(close_frame().as_slice())?; // zasto ovdje zovem as_slice
+            break;
+        }
+        print!("ws received {} bytes ", n);
+        io::stdout().write(&buf)?;
+        io::stdout().flush()?;
+        println!()
+
+        // match input.read(&mut client_buffer) {
+        //     Ok(n) => {
+        //         if n == 0 {
+        //             return Ok(());
+        //         } else {
+        //             io::stdout().write(&client_buffer).unwrap();
+        //             io::stdout().flush().unwrap();
+        //         }
+        //     }
+        //     Err(error) => program.print_fail(error.to_string()),
+        // }
+    }
+
+    Ok(())
+}
+
+fn is_close(buf: &[u8]) -> bool {
+    let msk = 0b0000_1111u8;
+    buf[0] & msk == 0x8
 }
 
 fn main() {
@@ -182,9 +243,13 @@ example of ws upgrade header:
 */
 /*
 
-const socket = new WebSocket('ws://localhost:8000');
+var socket = new WebSocket('ws://localhost:8000');
 socket.addEventListener('open', function (event) {
-    socket.send('Hello Server!');
+    console.log('open');
+    //socket.send('first');
+    //socket.send('second');
+    //socket.send('third');
+    socket.close();
 });
 socket.addEventListener('message', function (event) {
     console.log('Message from server ', event.data);
@@ -192,5 +257,9 @@ socket.addEventListener('message', function (event) {
 socket.addEventListener('close', function (event) {
     console.log('ws closed');
 });
+socket.addEventListener('error', function (event) {
+  console.log('ws error: ', event);
+});
+
 
 */

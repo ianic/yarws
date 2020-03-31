@@ -1,14 +1,14 @@
 // server.rs
 use base64;
 use sha1::{Digest, Sha1};
-use std::convert::TryInto;
 use std::io;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::str;
 
+
 #[derive(Debug)]
-struct Header {
+struct HTTPHeader {
     connection: String,
     upgrade: String,
     version: String,
@@ -16,9 +16,9 @@ struct Header {
     extensions: String,
 }
 
-impl Header {
-    fn new() -> Header {
-        Header {
+impl HTTPHeader {
+    fn new() -> HTTPHeader {
+        HTTPHeader {
             connection: String::new(),
             upgrade: String::new(),
             version: String::new(),
@@ -49,18 +49,22 @@ impl Header {
             && self.version == "13"
             && self.key.len() > 0
     }
-}
-fn a_frame() -> Vec<u8> {
-    let mut buf = vec![0b10000001u8, 0b00000100u8];
-    for b in "pero".as_bytes() {
-        buf.push(*b);
+
+    fn upgrade_response(&self) -> String {
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ".to_string() + 
+        &ws_accept(&self.key) + 
+        "\r\n\r\n"
     }
-    //buf.append("pero".as_bytes());
-    buf
 }
 
-fn close_frame() -> Vec<u8> {
-    vec![0b1000_1000u8, 0b0000_0000u8]
+const WS_MAGIC_KEY: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+fn ws_accept(key: &str) -> String {
+    let mut hasher = Sha1::new();
+    let s = key.to_string() + WS_MAGIC_KEY;
+
+    hasher.input(s.as_bytes());
+    let hr = hasher.result();
+    base64::encode(&hr)
 }
 
 fn parse_http_header(line: &str) -> Option<(&str, &str)> {
@@ -72,42 +76,30 @@ fn parse_http_header(line: &str) -> Option<(&str, &str)> {
 
 fn handle_connection(mut stream: TcpStream) -> io::Result<()> {
     //println!("handle_connection");
-    //let mut ostream = stream.try_clone()?;
     let mut rdr = io::BufReader::new(&stream);
-
-    let mut header = Header::new();
+    let mut header = HTTPHeader::new();
     loop {
         let mut line = String::new();
-
         // TODO: sta ako ovdje nikda nista ne posalje blokira mi thread !!!
         match rdr.read_line(&mut line) {
             Ok(0) => break, // eof
             Ok(2) => break, // empty line \r\n = end of header line
-            Ok(_n) => {
-                //print!("line: {}", line);
-                header.parse(&line);
-            }
+            Ok(_n) => header.parse(&line),
             _ => break,
         }
     }
 
     if header.is_ws_upgrade() {
-        let rsp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ".to_string() + &ws_accept(&header.key) + "\r\n\r\n";
-        stream.write_all(rsp.as_bytes())?;
+        stream.write_all(header.upgrade_response().as_bytes())?;
         stream.flush()?;
-        //ostream.write(a_frame().as_slice())?;
         return handle_ws_connection(stream);
-    } else {
-        //println!("bad request");
-        //println!("header: {:?}", header);
-        //println!("is websocket upgrade: {}", header.is_ws_upgrade());
-        //let rsp = "HTTP/1.1 200 OK\r\n\r\n{}";
-        let rsp = "HTTP/1.1 400 Bad Request\r\n\r\n";
-        stream.write_all(rsp.as_bytes())?;
-        stream.flush()?;
     }
+    //println!("bad request");
+    stream.write_all(BAD_REQUEST_HTTP_RESPONSE)?;
+    stream.flush()?;
     Ok(())
 }
+const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
 
 fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
     println!("ws open");
@@ -165,11 +157,6 @@ fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn is_close(buf: &[u8]) -> bool {
-    let msk = 0b0000_1111u8;
-    buf[0] & msk == 0x8
 }
 
 struct WsHeader {
@@ -264,6 +251,20 @@ impl WsHeader {
     }
 }
 
+fn a_frame() -> Vec<u8> {
+    let mut buf = vec![0b10000001u8, 0b00000100u8];
+    for b in "pero".as_bytes() {
+        buf.push(*b);
+    }
+    //buf.append("pero".as_bytes());
+    buf
+}
+
+fn close_frame() -> Vec<u8> {
+    vec![0b1000_1000u8, 0b0000_0000u8]
+}
+
+
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:8000").expect("could not start server");
 
@@ -282,16 +283,7 @@ fn main() {
     }
 }
 
-const WS_MAGIC_KEY: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-fn ws_accept(key: &str) -> String {
-    let mut hasher = Sha1::new();
-    let s = key.to_string() + WS_MAGIC_KEY;
-
-    hasher.input(s.as_bytes());
-    let hr = hasher.result();
-    base64::encode(&hr)
-}
 
 #[cfg(test)]
 #[macro_use]

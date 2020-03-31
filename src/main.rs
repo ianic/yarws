@@ -6,7 +6,6 @@ use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::str;
 
-
 #[derive(Debug)]
 struct HTTPHeader {
     connection: String,
@@ -51,9 +50,10 @@ impl HTTPHeader {
     }
 
     fn upgrade_response(&self) -> String {
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ".to_string() + 
-        &ws_accept(&self.key) + 
-        "\r\n\r\n"
+        let mut s = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ".to_string();
+        s.push_str(&ws_accept(&self.key));
+        s.push_str(&"\r\n\r\n");
+        s
     }
 }
 
@@ -264,7 +264,6 @@ fn close_frame() -> Vec<u8> {
     vec![0b1000_1000u8, 0b0000_0000u8]
 }
 
-
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:8000").expect("could not start server");
 
@@ -282,8 +281,6 @@ fn main() {
         }
     }
 }
-
-
 
 #[cfg(test)]
 #[macro_use]

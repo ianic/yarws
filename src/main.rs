@@ -114,49 +114,56 @@ fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
     let mut output = stream.try_clone()?;
     let mut input = stream;
 
-    let n = output.write(a_frame().as_slice())?;
+    let n = output.write(&a_frame())?;
     println!("ws written {} bytes", n);
     output.flush()?;
 
     loop {
         let mut buf = [0u8; 2];
-        let n = input.read(&mut buf)?;
-        if n != 2 {
-            // TODO: error missing header
-            break;
-        }
-        let mut h = WsHeader::new(buf[0], buf[1]);
+        input.read_exact(&mut buf)?;
 
+        let mut h = WsHeader::new(buf[0], buf[1]);
         let rn = h.read_next() as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
-            let n = input.read(&mut buf)?;
-            if n != rn {
-                // TODO: error missing header
-                break;
-            }
+            input.read_exact(&mut buf)?;
             h.set_header(&buf);
         }
 
         let rn = h.payload_len as usize;
-        if h.payload_len > 0 {
+        if rn > 0 {
             let mut buf = vec![0u8; rn];
-            let n = input.read(&mut buf)?;
-            if n != rn {
-                // TODO: error missing header
+            input.read_exact(&mut buf)?;
+            h.set_payload(&buf);
+        }
+
+        match h.kind() {
+            WsFrameKind::Text => println!("ws body {} bytes, as str: {}", rn, h.payload_str()),
+            WsFrameKind::Binary => println!("ws body is binary frame of size {}", h.payload_len),
+            WsFrameKind::Close => {
+                println!("ws close");
+                output.write(close_frame().as_slice())?; // zasto ovdje zovem as_slice
                 break;
             }
-            h.set_payload(&buf);
-            println!("ws body {} bytes, as str: {}", n, h.payload_str());
-        }
-
-        if h.is_close() {
-            println!("ws close request recieved");
-            output.write(close_frame().as_slice())?; // zasto ovdje zovem as_slice
-            break;
+            WsFrameKind::Ping => {
+                println!("ws ping");
+                output.write(&h.to_pong())?;
+            }
+            WsFrameKind::Pong => println!("ws pong"),
+            WsFrameKind::Continuation => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ws continuation frame not supported",
+                ));
+            }
+            WsFrameKind::Reserved(opcode) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("reserved ws frame opcode {}", opcode),
+                ));
+            }
         }
     }
-
     Ok(())
 }
 
@@ -175,6 +182,16 @@ struct WsHeader {
     payload_len: u64,
     masking_key: [u8; 4],
     payload: Vec<u8>,
+}
+
+enum WsFrameKind {
+    Continuation,
+    Text,
+    Binary,
+    Close,
+    Ping,
+    Pong,
+    Reserved(u8),
 }
 
 impl WsHeader {
@@ -230,8 +247,20 @@ impl WsHeader {
             _ => "",
         }
     }
-    fn is_close(&self) -> bool {
-        self.opcode == 8
+    fn kind(&self) -> WsFrameKind {
+        match self.opcode {
+            0 => WsFrameKind::Continuation,
+            1 => WsFrameKind::Text,
+            2 => WsFrameKind::Binary,
+            8 => WsFrameKind::Close,
+            9 => WsFrameKind::Ping,
+            0xa => WsFrameKind::Pong,
+            _ => WsFrameKind::Reserved(self.opcode),
+        }
+    }
+    fn to_pong(&self) -> [u8; 2] {
+        let buf = [0b1000_1010u8, 0b00000000u8];
+        buf
     }
 }
 

@@ -1,10 +1,12 @@
 // server.rs
 use base64;
 use sha1::{Digest, Sha1};
-use std::io;
-use std::io::prelude::*;
-use std::net::{TcpListener, TcpStream};
 use std::str;
+use tokio;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::prelude::*;
+use tokio::stream::StreamExt;
 
 #[derive(Debug)]
 struct HTTPHeader {
@@ -74,58 +76,59 @@ fn parse_http_header(line: &str) -> Option<(&str, &str)> {
     Some((first, second.trim()))
 }
 
-fn handle_connection(mut stream: TcpStream) -> io::Result<()> {
+async fn handle_connection(mut stream: TcpStream) -> io::Result<()> {
     //println!("handle_connection");
-    let mut rdr = io::BufReader::new(&stream);
+    let mut rdr = io::BufReader::new(&mut stream);
     let mut header = HTTPHeader::new();
     loop {
         let mut line = String::new();
         // TODO: sta ako ovdje nikda nista ne posalje blokira mi thread !!!
-        match rdr.read_line(&mut line) {
-            Ok(0) => break, // eof
-            Ok(2) => break, // empty line \r\n = end of header line
-            Ok(_n) => header.parse(&line),
-            _ => break,
+        match rdr.read_line(&mut line).await? {
+            0 => break, // eof
+            2 => break, // empty line \r\n = end of header line
+            _n => header.parse(&line),
+            //            _ => break,
         }
     }
 
     if header.is_ws_upgrade() {
-        stream.write_all(header.upgrade_response().as_bytes())?;
-        stream.flush()?;
-        return handle_ws_connection(stream);
+        stream
+            .write_all(header.upgrade_response().as_bytes())
+            .await?;
+        //stream.flush()?;
+        return handle_ws_connection(stream).await;
     }
     //println!("bad request");
-    stream.write_all(BAD_REQUEST_HTTP_RESPONSE)?;
-    stream.flush()?;
+    stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
+    //stream.flush()?;
     Ok(())
 }
 const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
 
-fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
+async fn handle_ws_connection(mut stream: TcpStream) -> io::Result<()> {
     println!("ws open");
-    let mut output = stream.try_clone()?;
-    let mut input = stream;
+    let (mut input, mut output) = stream.split();
 
-    let n = output.write(&a_frame())?;
+    let n = output.write(&a_frame()).await?;
     println!("ws written {} bytes", n);
-    output.flush()?;
+    output.flush().await?;
 
     loop {
         let mut buf = [0u8; 2];
-        input.read_exact(&mut buf)?;
+        input.read_exact(&mut buf).await?;
 
         let mut h = WsHeader::new(buf[0], buf[1]);
         let rn = h.read_next() as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
-            input.read_exact(&mut buf)?;
+            input.read_exact(&mut buf).await?;
             h.set_header(&buf);
         }
 
         let rn = h.payload_len as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
-            input.read_exact(&mut buf)?;
+            input.read_exact(&mut buf).await?;
             h.set_payload(&buf);
         }
 
@@ -134,12 +137,12 @@ fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
             WsFrameKind::Binary => println!("ws body is binary frame of size {}", h.payload_len),
             WsFrameKind::Close => {
                 println!("ws close");
-                output.write(close_frame().as_slice())?; // zasto ovdje zovem as_slice
+                output.write(close_frame().as_slice()).await?; // zasto ovdje zovem as_slice
                 break;
             }
             WsFrameKind::Ping => {
                 println!("ws ping");
-                output.write(&h.to_pong())?;
+                output.write(&h.to_pong()).await?;
             }
             WsFrameKind::Pong => println!("ws pong"),
             WsFrameKind::Continuation => {
@@ -264,22 +267,29 @@ fn close_frame() -> Vec<u8> {
     vec![0b1000_1000u8, 0b0000_0000u8]
 }
 
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:8000").expect("could not start server");
+#[tokio::main]
+async fn main() {
+    let mut listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
-    // accept connections and get a TcpStream
-    for connection in listener.incoming() {
-        match connection {
-            Ok(stream) => {
-                if let Err(e) = handle_connection(stream) {
-                    println!("error {:?}", e);
+    let server = {
+        async move {
+            let mut incoming = listener.incoming();
+
+            while let Some(conn) = incoming.next().await {
+                match conn {
+                    Err(e) => eprintln!("accept failed = {:?}", e),
+                    Ok(sock) => {
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(sock).await {
+                                println!("error {:?}", e);
+                            }
+                        });
+                    }
                 }
             }
-            Err(e) => {
-                print!("connection failed {}\n", e);
-            }
         }
-    }
+    };
+    server.await;
 }
 
 #[cfg(test)]

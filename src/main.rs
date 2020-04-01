@@ -2,14 +2,17 @@
 use base64;
 use sha1::{Digest, Sha1};
 use std::str;
-use std::time::Duration;
+
 use tokio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
 use tokio::spawn;
 use tokio::stream::StreamExt;
-use tokio::time;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Receiver, Sender};
+//use std::time::Duration;
+//use tokio::time;
 
 #[derive(Debug)]
 struct HTTPHeader {
@@ -111,13 +114,15 @@ const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_b
 async fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
     println!("ws open");
     let (input, output) = io::split(stream);
+    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+
     spawn(async move {
-        if let Err(e) = ws_write(output).await {
+        if let Err(e) = ws_write(output, rx).await {
             println!("ws_write error {:?}", e);
         }
     });
     spawn(async move {
-        if let Err(e) = ws_read(input).await {
+        if let Err(e) = ws_read(input, tx).await {
             println!("ws_read error {:?}", e);
         }
     });
@@ -125,7 +130,7 @@ async fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-async fn ws_read(mut input: ReadHalf<TcpStream>) -> io::Result<()> {
+async fn ws_read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> io::Result<()> {
     loop {
         let mut buf = [0u8; 2];
         input.read_exact(&mut buf).await?;
@@ -150,12 +155,22 @@ async fn ws_read(mut input: ReadHalf<TcpStream>) -> io::Result<()> {
             WsFrameKind::Binary => println!("ws body is binary frame of size {}", h.payload_len),
             WsFrameKind::Close => {
                 println!("ws close");
-                //output.write(close_frame().as_slice()).await?; // zasto ovdje zovem as_slice
+                if let Err(_) = rx.send(close_frame()).await {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "failed to send close",
+                    ));
+                }
                 break;
             }
             WsFrameKind::Ping => {
                 println!("ws ping");
-                //output.write(&h.to_pong()).await?;
+                if let Err(_) = rx.send(h.to_pong()).await {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "failed to send pong",
+                    ));
+                }
             }
             WsFrameKind::Pong => println!("ws pong"),
             WsFrameKind::Continuation => {
@@ -171,19 +186,32 @@ async fn ws_read(mut input: ReadHalf<TcpStream>) -> io::Result<()> {
                 ));
             }
         }
+
+        if let Err(_) = rx.send(a_frame()).await {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "failed to send a frame",
+            ));
+        }
     }
 
     Ok(())
 }
 
-async fn ws_write(mut output: WriteHalf<TcpStream>) -> io::Result<()> {
-    let mut interval = time::interval(Duration::from_secs(1));
-    loop {
-        interval.tick().await;
-        let n = output.write(&a_frame()).await?;
+async fn ws_write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -> io::Result<()> {
+    while let Some(v) = rx.recv().await {
+        let n = output.write(&v).await?;
         println!("ws written {} bytes", n);
         output.flush().await?;
     }
+    println!("write half closed");
+    // let mut interval = time::interval(Duration::from_secs(1));
+    // loop {
+    //     interval.tick().await;
+    //     let n = output.write(&a_frame()).await?;
+    //     println!("ws written {} bytes", n);
+    //     output.flush().await?;
+    // }
     Ok(())
 }
 
@@ -273,9 +301,8 @@ impl WsHeader {
             _ => WsFrameKind::Reserved(self.opcode),
         }
     }
-    fn to_pong(&self) -> [u8; 2] {
-        let buf = [0b1000_1010u8, 0b00000000u8];
-        buf
+    fn to_pong(&self) -> Vec<u8> {
+        vec![0b1000_1010u8, 0b00000000u8]
     }
 }
 
@@ -304,7 +331,7 @@ async fn main() {
                 match conn {
                     Err(e) => eprintln!("accept failed = {:?}", e),
                     Ok(sock) => {
-                        tokio::spawn(async move {
+                        spawn(async move {
                             if let Err(e) = handle_connection(sock).await {
                                 println!("error {:?}", e);
                             }

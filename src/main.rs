@@ -2,11 +2,14 @@
 use base64;
 use sha1::{Digest, Sha1};
 use std::str;
+use std::time::Duration;
 use tokio;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
+use tokio::spawn;
 use tokio::stream::StreamExt;
+use tokio::time;
 
 #[derive(Debug)]
 struct HTTPHeader {
@@ -105,14 +108,24 @@ async fn handle_connection(mut stream: TcpStream) -> io::Result<()> {
 }
 const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
 
-async fn handle_ws_connection(mut stream: TcpStream) -> io::Result<()> {
+async fn handle_ws_connection(stream: TcpStream) -> io::Result<()> {
     println!("ws open");
-    let (mut input, mut output) = stream.split();
+    let (input, output) = io::split(stream);
+    spawn(async move {
+        if let Err(e) = ws_write(output).await {
+            println!("ws_write error {:?}", e);
+        }
+    });
+    spawn(async move {
+        if let Err(e) = ws_read(input).await {
+            println!("ws_read error {:?}", e);
+        }
+    });
+    println!("ws spawned");
+    Ok(())
+}
 
-    let n = output.write(&a_frame()).await?;
-    println!("ws written {} bytes", n);
-    output.flush().await?;
-
+async fn ws_read(mut input: ReadHalf<TcpStream>) -> io::Result<()> {
     loop {
         let mut buf = [0u8; 2];
         input.read_exact(&mut buf).await?;
@@ -137,12 +150,12 @@ async fn handle_ws_connection(mut stream: TcpStream) -> io::Result<()> {
             WsFrameKind::Binary => println!("ws body is binary frame of size {}", h.payload_len),
             WsFrameKind::Close => {
                 println!("ws close");
-                output.write(close_frame().as_slice()).await?; // zasto ovdje zovem as_slice
+                //output.write(close_frame().as_slice()).await?; // zasto ovdje zovem as_slice
                 break;
             }
             WsFrameKind::Ping => {
                 println!("ws ping");
-                output.write(&h.to_pong()).await?;
+                //output.write(&h.to_pong()).await?;
             }
             WsFrameKind::Pong => println!("ws pong"),
             WsFrameKind::Continuation => {
@@ -158,6 +171,18 @@ async fn handle_ws_connection(mut stream: TcpStream) -> io::Result<()> {
                 ));
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn ws_write(mut output: WriteHalf<TcpStream>) -> io::Result<()> {
+    let mut interval = time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        let n = output.write(&a_frame()).await?;
+        println!("ws written {} bytes", n);
+        output.flush().await?;
     }
     Ok(())
 }

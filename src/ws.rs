@@ -60,7 +60,7 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             FrameKind::Binary => println!("ws body is binary frame of size {}", header.payload_len),
             FrameKind::Close => {
                 println!("ws close");
-                rx.send(close_frame()).await?;
+                rx.send(close_message()).await?;
             }
             FrameKind::Ping => {
                 println!("ws ping");
@@ -175,40 +175,22 @@ impl Header {
         }
     }
     fn to_pong(&self) -> Vec<u8> {
-        vec![0b1000_1010u8, 0b00000000u8]
+        //vec![0b1000_1010u8, 0b00000000u8]
+        create_message(FrameKind::Pong, &self.payload)
     }
 }
 
-fn pero_frame() -> Vec<u8> {
-    let mut buf = vec![0b10000001u8, 0b00000100u8];
-    for b in "pero".as_bytes() {
-        buf.push(*b);
-    }
-    buf
-}
-
-fn close_frame() -> Vec<u8> {
+fn close_message() -> Vec<u8> {
     vec![0b1000_1000u8, 0b0000_0000u8]
 }
 
 fn text_message(text: &str) -> Vec<u8> {
-    let body = text.as_bytes();
-    let mut buf = vec![0b1000_0001u8];
+    create_message(FrameKind::Text, text.as_bytes())
+}
 
-    let l = body.len();
-    if l < 126 {
-        buf.push(l as u8);
-    } else if body.len() < 65536 {
-        buf.push(126u8);
-        let l = l as u16;
-        buf.extend_from_slice(&l.to_be_bytes());
-    } else {
-        buf.push(127u8);
-        let l = l as u64;
-        buf.extend_from_slice(&l.to_be_bytes());
-    }
-    buf.extend_from_slice(body);
-    buf
+#[allow(dead_code)]
+fn binary_message(data: &[u8]) -> Vec<u8> {
+    create_message(FrameKind::Binary, data)
 }
 
 /*
@@ -231,6 +213,35 @@ fn text_message(text: &str) -> Vec<u8> {
 |                     Payload Data continued ...                |
 +---------------------------------------------------------------+
 */
+fn create_message(kind: FrameKind, body: &[u8]) -> Vec<u8> {
+    let mut first = 0b1000_0000u8;
+    first += match kind {
+        FrameKind::Text => 1,
+        FrameKind::Binary => 2,
+        FrameKind::Close => 8,
+        FrameKind::Ping => 9,
+        FrameKind::Pong => 0xa,
+        _ => 0,
+    };
+    let mut buf = vec![first];
+
+    // add peyload length
+    let l = body.len();
+    if l < 126 {
+        buf.push(l as u8);
+    } else if body.len() < 65536 {
+        buf.push(126u8);
+        let l = l as u16;
+        buf.extend_from_slice(&l.to_be_bytes());
+    } else {
+        buf.push(127u8);
+        let l = l as u64;
+        buf.extend_from_slice(&l.to_be_bytes());
+    }
+
+    buf.extend_from_slice(body);
+    buf
+}
 
 #[cfg(test)]
 mod tests {
@@ -245,6 +256,7 @@ mod tests {
         assert_eq!(179, buf.len());
         assert_eq!([0x81, 0x7e, 0x00, 0xaf], buf[0..4]);
         assert_eq!(0xaf, buf[3]); // 175 is body length
-                                  //println!("{:02x?}", buf);
+
+        //println!("{:02x?}", buf);
     }
 }

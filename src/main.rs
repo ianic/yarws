@@ -18,8 +18,12 @@ async fn main() {
             while let Some(conn) = incoming.next().await {
                 match conn {
                     Err(e) => eprintln!("accept failed = {:?}", e),
-                    Ok(sock) => {
+                    Ok(mut sock) => {
                         spawn(async move {
+                            if let Err(e) = http::upgrade(&mut sock).await {
+                                println!("error {:?}", e);
+                                return;
+                            }
                             if let Err(e) = ws::handle(sock).await {
                                 println!("error {:?}", e);
                             }

@@ -6,9 +6,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
-use crate::ws;
+//use crate::ws;
 
-pub async fn upgrade(mut stream: TcpStream) -> io::Result<()> {
+pub async fn upgrade(mut stream: &mut TcpStream) -> io::Result<()> {
     //println!("handle_connection");
     let mut rdr = io::BufReader::new(&mut stream);
     let mut header = Header::new();
@@ -28,12 +28,17 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<()> {
             .write_all(header.upgrade_response().as_bytes())
             .await?;
         //stream.flush()?;
-        return ws::handle_ws(stream).await;
+        //return ws::handle_ws(stream).await;
+        return Ok(());
     }
     //println!("bad request");
     stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid ws upgrade header",
+    ))
     //stream.flush()?;
-    Ok(())
+    //Ok(())
 }
 const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
 

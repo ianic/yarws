@@ -7,13 +7,13 @@ use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::http;
+//use crate::http;
+
+// pub async fn handle(stream: TcpStream) -> io::Result<()> {
+//     http::upgrade(stream).await
+// }
 
 pub async fn handle(stream: TcpStream) -> io::Result<()> {
-    http::upgrade(stream).await
-}
-
-pub async fn handle_ws(stream: TcpStream) -> io::Result<()> {
     println!("ws open");
     let (input, output) = io::split(stream);
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);

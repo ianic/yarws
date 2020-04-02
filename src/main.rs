@@ -216,9 +216,13 @@ async fn ws_write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -
 }
 
 struct WsHeader {
+    #[allow(dead_code)]
     fin: bool,
+    #[allow(dead_code)]
     rsv1: bool,
+    #[allow(dead_code)]
     rsv2: bool,
+    #[allow(dead_code)]
     rsv3: bool,
     mask: bool,
     opcode: u8,

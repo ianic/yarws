@@ -21,16 +21,11 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<TcpStream> {
     }
 
     if header.is_ws_upgrade() {
-        stream
-            .write_all(header.upgrade_response().as_bytes())
-            .await?;
+        stream.write_all(header.upgrade_response().as_bytes()).await?;
         return Ok(stream);
     }
     stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "invalid ws upgrade header",
-    ))
+    Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ws upgrade header"))
 }
 
 const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
@@ -72,14 +67,13 @@ impl Header {
     }
 
     fn is_ws_upgrade(&self) -> bool {
-        self.connection == "Upgrade"
-            && self.upgrade == "websocket"
-            && self.version == "13"
-            && self.key.len() > 0
+        self.connection == "Upgrade" && self.upgrade == "websocket" && self.version == "13" && self.key.len() > 0
     }
 
     fn upgrade_response(&self) -> String {
-        let mut s = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ".to_string();
+        let mut s =
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "
+                .to_string();
         s.push_str(&ws_accept(&self.key));
         s.push_str(&"\r\n\r\n");
         s
@@ -131,10 +125,10 @@ mod tests {
         assert_eq!(acc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
-    #[test]
-    fn test_frame() {
-        let mut buf = vec![0b10000001u8, 0b00000001u8];
-        buf.push("a".as_bytes()[0]);
-        println!("buf: {:?}", buf)
-    }
+    //#[test]
+    // fn test_frame() {
+    //     let mut buf = vec![0b10000001u8, 0b00000001u8];
+    //     buf.push("a".as_bytes()[0]);
+    //     println!("buf: {:?}", buf)
+    // }
 }

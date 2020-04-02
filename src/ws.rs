@@ -53,7 +53,10 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
         }
 
         match header.kind() {
-            FrameKind::Text => println!("ws body {} bytes, as str: {}", rn, header.payload_str()),
+            FrameKind::Text => {
+                println!("ws body {} bytes, as str: {}", rn, header.payload_str());
+                rx.send(text_message(header.payload_str())).await?;
+            }
             FrameKind::Binary => println!("ws body is binary frame of size {}", header.payload_len),
             FrameKind::Close => {
                 println!("ws close");
@@ -71,8 +74,6 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
                 return Err(format!("reserved ws frame opcode {}", opcode).into());
             }
         }
-
-        rx.send(pero_frame()).await?
     }
 
     Ok(())
@@ -188,4 +189,62 @@ fn pero_frame() -> Vec<u8> {
 
 fn close_frame() -> Vec<u8> {
     vec![0b1000_1000u8, 0b0000_0000u8]
+}
+
+fn text_message(text: &str) -> Vec<u8> {
+    let body = text.as_bytes();
+    let mut buf = vec![0b1000_0001u8];
+
+    let l = body.len();
+    if l < 126 {
+        buf.push(l as u8);
+    } else if body.len() < 65536 {
+        buf.push(126u8);
+        let l = l as u16;
+        buf.extend_from_slice(&l.to_be_bytes());
+    } else {
+        buf.push(127u8);
+        let l = l as u64;
+        buf.extend_from_slice(&l.to_be_bytes());
+    }
+    buf.extend_from_slice(body);
+    buf
+}
+
+/*
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-------+-+-------------+-------------------------------+
+|F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+|I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+|N|V|V|V|       |S|             |   (if payload len==126/127)   |
+| |1|2|3|       |K|             |                               |
++-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+|     Extended payload length continued, if payload len == 127  |
++ - - - - - - - - - - - - - - - +-------------------------------+
+|                               |Masking-key, if MASK set to 1  |
++-------------------------------+-------------------------------+
+| Masking-key (continued)       |          Payload Data         |
++-------------------------------- - - - - - - - - - - - - - - - +
+:                     Payload Data continued ...                :
++ - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+|                     Payload Data continued ...                |
++---------------------------------------------------------------+
+*/
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_text_message() {
+        let buf = text_message("abc");
+        assert_eq!(5, buf.len());
+        assert_eq!([0x81, 0x03, 0x61, 0x62, 0x63], buf[0..]);
+
+        let buf = text_message("The length of the Payload data, in bytes: if 0-125, that is the payload length.  If 126, the following 2 bytes interpreted as a 16-bit unsigned integer are the payload length.");
+        assert_eq!(179, buf.len());
+        assert_eq!([0x81, 0x7e, 0x00, 0xaf], buf[0..4]);
+        assert_eq!(0xaf, buf[3]); // 175 is body length
+                                  //println!("{:02x?}", buf);
+    }
 }

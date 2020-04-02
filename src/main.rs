@@ -22,11 +22,7 @@ async fn main() {
                         spawn(async move {
                             match http::upgrade(sock).await {
                                 Err(e) => println!("upgrade error {:?}", e),
-                                Ok(ws_sock) => {
-                                    if let Err(e) = ws::handle(ws_sock).await {
-                                        println!("ws error {:?}", e);
-                                    }
-                                }
+                                Ok(ws_sock) => ws::handle(ws_sock).await,
                             }
                         });
                     }

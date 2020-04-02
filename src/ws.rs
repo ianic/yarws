@@ -7,13 +7,7 @@ use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-//use crate::http;
-
-// pub async fn handle(stream: TcpStream) -> io::Result<()> {
-//     http::upgrade(stream).await
-// }
-
-pub async fn handle(stream: TcpStream) -> io::Result<()> {
+pub async fn handle(stream: TcpStream) {
     println!("ws open");
     let (input, output) = io::split(stream);
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
@@ -22,20 +16,25 @@ pub async fn handle(stream: TcpStream) -> io::Result<()> {
         if let Err(e) = write(output, rx).await {
             println!("ws_write error {:?}", e);
         }
+        println!("write half closed");
     });
     spawn(async move {
         if let Err(e) = read(input, tx).await {
             println!("ws_read error {:?}", e);
         }
+        println!("read half closed");
     });
-    println!("ws spawned");
-    Ok(())
 }
 
 async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> io::Result<()> {
     loop {
         let mut buf = [0u8; 2];
-        input.read_exact(&mut buf).await?;
+        if let Err(e) = input.read_exact(&mut buf).await {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                break; //tcp closed without ws close handshake
+            }
+            return Err(e);
+        }
 
         let mut h = Header::new(buf[0], buf[1]);
         let rn = h.read_next() as usize;
@@ -106,7 +105,6 @@ async fn write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -> i
         println!("ws written {} bytes", n);
         output.flush().await?;
     }
-    println!("write half closed");
     Ok(())
 }
 

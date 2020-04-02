@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::str;
 use tokio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -26,74 +27,52 @@ pub async fn handle(stream: TcpStream) {
     });
 }
 
-async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> io::Result<()> {
+async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
     loop {
         let mut buf = [0u8; 2];
         if let Err(e) = input.read_exact(&mut buf).await {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 break; //tcp closed without ws close handshake
             }
-            return Err(e);
+            return Err(Box::new(e));
         }
 
-        let mut h = Header::new(buf[0], buf[1]);
-        let rn = h.read_next() as usize;
+        let mut header = Header::new(buf[0], buf[1]);
+        let rn = header.read_next() as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
             input.read_exact(&mut buf).await?;
-            h.set_header(&buf);
+            header.set_header(&buf);
         }
 
-        let rn = h.payload_len as usize;
+        let rn = header.payload_len as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
             input.read_exact(&mut buf).await?;
-            h.set_payload(&buf);
+            header.set_payload(&buf);
         }
 
-        match h.kind() {
-            FrameKind::Text => println!("ws body {} bytes, as str: {}", rn, h.payload_str()),
-            FrameKind::Binary => println!("ws body is binary frame of size {}", h.payload_len),
+        match header.kind() {
+            FrameKind::Text => println!("ws body {} bytes, as str: {}", rn, header.payload_str()),
+            FrameKind::Binary => println!("ws body is binary frame of size {}", header.payload_len),
             FrameKind::Close => {
                 println!("ws close");
-                if let Err(_) = rx.send(close_frame()).await {
-                    return Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "failed to send close",
-                    ));
-                }
-                break;
+                rx.send(close_frame()).await?;
             }
             FrameKind::Ping => {
                 println!("ws ping");
-                if let Err(_) = rx.send(h.to_pong()).await {
-                    return Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "failed to send pong",
-                    ));
-                }
+                rx.send(header.to_pong()).await?;
             }
             FrameKind::Pong => println!("ws pong"),
             FrameKind::Continuation => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "ws continuation frame not supported",
-                ));
+                return Err("ws continuation frame not supported".into());
             }
             FrameKind::Reserved(opcode) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("reserved ws frame opcode {}", opcode),
-                ));
+                return Err(format!("reserved ws frame opcode {}", opcode).into());
             }
         }
 
-        if let Err(_) = rx.send(pero_frame()).await {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "failed to send a frame",
-            ));
-        }
+        rx.send(pero_frame()).await?
     }
 
     Ok(())
@@ -101,9 +80,7 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> io::Re
 
 async fn write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -> io::Result<()> {
     while let Some(v) = rx.recv().await {
-        let n = output.write(&v).await?;
-        println!("ws written {} bytes", n);
-        output.flush().await?;
+        output.write(&v).await?;
     }
     Ok(())
 }
@@ -161,9 +138,7 @@ impl Header {
     fn set_header(&mut self, buf: &[u8]) {
         let mask_start = buf.len() - 4;
         if mask_start == 8 {
-            let bytes: [u8; 8] = [
-                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-            ];
+            let bytes: [u8; 8] = [buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]];
             self.payload_len = u64::from_be_bytes(bytes);
         }
         if mask_start == 2 {

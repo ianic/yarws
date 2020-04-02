@@ -24,11 +24,10 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<TcpStream> {
         stream.write_all(header.upgrade_response().as_bytes()).await?;
         return Ok(stream);
     }
+    const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
     stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
     Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ws upgrade header"))
 }
-
-const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
 
 #[derive(Debug)]
 struct Header {
@@ -71,9 +70,9 @@ impl Header {
     }
 
     fn upgrade_response(&self) -> String {
-        let mut s =
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "
-                .to_string();
+        const HEADER: &str =
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ";
+        let mut s = HEADER.to_string();
         s.push_str(&ws_accept(&self.key));
         s.push_str(&"\r\n\r\n");
         s

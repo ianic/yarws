@@ -37,38 +37,38 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             }
             return Err(Box::new(e));
         }
-        let mut header = Header::new(buf[0], buf[1]);
+        let mut frame = Frame::new(buf[0], buf[1]);
         // read rest of the header
-        let rn = header.read_next() as usize;
+        let rn = frame.header_continuation_size() as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
             input.read_exact(&mut buf).await?;
-            header.set_header(&buf);
+            frame.set_header_continuation(&buf);
         }
         // read payload
-        let rn = header.payload_len as usize;
+        let rn = frame.payload_len as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
             input.read_exact(&mut buf).await?;
-            header.set_payload(&buf);
+            frame.set_payload(&buf);
         }
 
-        if !header.is_ok() {
+        if !frame.is_ok() {
             break;
         }
         // decide what to to
-        match header.opcode {
+        match frame.opcode {
             CONTINUATION => {
                 return Err("ws continuation frame not supported".into());
             }
             TEXT => {
                 //println!("ws body {} bytes, as str: {}", rn, header.payload_str());
                 println!("ws body {} bytes", rn);
-                rx.send(text_message(header.payload_str())).await?;
+                rx.send(text_message(frame.payload_str())).await?;
             }
             BINARY => {
-                println!("ws body is binary frame of size {}", header.payload_len);
-                rx.send(binary_message(&header.payload)).await?;
+                println!("ws body is binary frame of size {}", frame.payload_len);
+                rx.send(binary_message(&frame.payload)).await?;
             }
             CLOSE => {
                 println!("ws close");
@@ -77,11 +77,11 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             }
             PING => {
                 println!("ws ping");
-                rx.send(header.to_pong()).await?;
+                rx.send(frame.to_pong()).await?;
             }
             PONG => println!("ws pong"),
             _ => {
-                return Err(format!("reserved ws frame opcode {}", header.opcode).into());
+                return Err(format!("reserved ws frame opcode {}", frame.opcode).into());
             }
         }
     }
@@ -96,7 +96,7 @@ async fn write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -> i
 }
 
 #[derive(Debug)]
-struct Header {
+struct Frame {
     fin: bool,
     rsv: u8,
     mask: bool,
@@ -115,9 +115,9 @@ const CLOSE: u8 = 8;
 const PING: u8 = 9;
 const PONG: u8 = 10;
 
-impl Header {
-    fn new(byte1: u8, byte2: u8) -> Header {
-        Header {
+impl Frame {
+    fn new(byte1: u8, byte2: u8) -> Frame {
+        Frame {
             fin: byte1 & 0b1000_0000u8 != 0,
             rsv: (byte1 & 0b0111_0000u8) >> 4,
             opcode: byte1 & 0b0000_1111u8,
@@ -127,7 +127,7 @@ impl Header {
             payload: vec![0; 0],
         }
     }
-    fn read_next(&self) -> u8 {
+    fn header_continuation_size(&self) -> u8 {
         let mut n: u8 = if self.mask { 4 } else { 0 };
         if self.payload_len >= 126 {
             n += 2;
@@ -137,7 +137,7 @@ impl Header {
         }
         n
     }
-    fn set_header(&mut self, buf: &[u8]) {
+    fn set_header_continuation(&mut self, buf: &[u8]) {
         let mask_start = buf.len() - 4;
         if mask_start == 8 {
             let bytes: [u8; 8] = [buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]];
@@ -187,7 +187,6 @@ impl Header {
         self.is_rsv_ok()
     }
     fn to_pong(&self) -> Vec<u8> {
-        //vec![0b1000_1010u8, 0b00000000u8]
         create_message(PONG, &self.payload)
     }
 }

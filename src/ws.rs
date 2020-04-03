@@ -58,6 +58,7 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             println!("frame is not ok");
             break;
         }
+
         if !frame.is_control_frame() {
             if frame.is_start() {
                 start_frame = frame;
@@ -66,7 +67,9 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             } else if frame.is_end() {
                 println!("end frame");
                 start_frame.append(&frame);
-
+                if !start_frame.is_valid_payload() {
+                    break;
+                }
                 match start_frame.opcode {
                     TEXT => {
                         println!("ws body {} bytes", rn);
@@ -83,11 +86,18 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
 
                 start_frame = Frame::empty();
                 continue;
+            } else if frame.opcode == CONTINUATION {
+                start_frame.append(&frame);
+                continue;
+            }
+            if !frame.is_valid_payload() {
+                break;
             }
         }
         // decide what to to
         match frame.opcode {
             CONTINUATION => {
+                //TODO: dovdje ne moze doci
                 println!("continuation frame");
                 start_frame.append(&frame);
                 //return Err("ws continuation frame not supported".into());
@@ -224,6 +234,12 @@ impl Frame {
             }
         }
         self.is_rsv_ok()
+    }
+    fn is_valid_payload(&self) -> bool {
+        if self.opcode != TEXT {
+            return true;
+        }
+        return str::from_utf8(&self.payload).is_ok();
     }
     fn is_start(&self) -> bool {
         return !self.fin && self.is_data_frame();

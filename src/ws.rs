@@ -28,7 +28,8 @@ pub async fn handle(stream: TcpStream) {
 }
 
 async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
-    let mut start_frame = Frame::empty();
+    let mut continuation = Frame::empty();
+    // TODO izbjegni kreiranje novih buffera za svaku poruku
     loop {
         // read first two bytes
         let mut buf = [0u8; 2];
@@ -54,40 +55,40 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             frame.set_payload(&buf);
         }
 
-        if !frame.is_ok(!start_frame.is_empty()) {
+        if !frame.is_ok(!continuation.is_empty()) {
             println!("frame is not ok");
             break;
         }
 
         if !frame.is_control_frame() {
             if frame.is_start() {
-                start_frame = frame;
+                continuation = frame;
                 println!("start frame");
                 continue;
             } else if frame.is_end() {
                 println!("end frame");
-                start_frame.append(&frame);
-                if !start_frame.is_valid_payload() {
+                continuation.append(&frame);
+                if !continuation.is_valid_payload() {
                     break;
                 }
-                match start_frame.opcode {
+                match continuation.opcode {
                     TEXT => {
                         println!("ws body {} bytes", rn);
-                        rx.send(text_message(start_frame.payload_str())).await?;
+                        rx.send(text_message(continuation.payload_str())).await?;
                     }
                     BINARY => {
                         println!("ws body is binary frame of size {}", frame.payload_len);
-                        rx.send(binary_message(&start_frame.payload)).await?;
+                        rx.send(binary_message(&continuation.payload)).await?;
                     }
                     _ => {
-                        return Err(format!("reserved ws frame opcode {}", start_frame.opcode).into());
+                        return Err(format!("reserved ws frame opcode {}", continuation.opcode).into());
                     }
                 }
 
-                start_frame = Frame::empty();
+                continuation = Frame::empty();
                 continue;
             } else if frame.opcode == CONTINUATION {
-                start_frame.append(&frame);
+                continuation.append(&frame);
                 continue;
             }
             if !frame.is_valid_payload() {
@@ -99,7 +100,7 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             CONTINUATION => {
                 //TODO: dovdje ne moze doci
                 println!("continuation frame");
-                start_frame.append(&frame);
+                continuation.append(&frame);
                 //return Err("ws continuation frame not supported".into());
             }
             TEXT => {

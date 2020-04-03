@@ -29,6 +29,7 @@ pub async fn handle(stream: TcpStream) {
 
 async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
     loop {
+        // read first two bytes
         let mut buf = [0u8; 2];
         if let Err(e) = input.read_exact(&mut buf).await {
             if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -36,58 +37,54 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             }
             return Err(Box::new(e));
         }
-        //println!("1: {:02x?}", buf);
-
         let mut header = Header::new(buf[0], buf[1]);
+        // read rest of the header
         let rn = header.read_next() as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
             input.read_exact(&mut buf).await?;
             header.set_header(&buf);
-            //println!("2: {:02x?}", buf);
         }
-
+        // read payload
         let rn = header.payload_len as usize;
         if rn > 0 {
             let mut buf = vec![0u8; rn];
             input.read_exact(&mut buf).await?;
             header.set_payload(&buf);
-            //println!("3: {:02x?}", buf);
         }
 
         if !header.is_ok() {
             break;
         }
-        //println!("3 header: {:?}", header);
-        match header.kind() {
-            FrameKind::Text => {
+        // decide what to to
+        match header.opcode {
+            CONTINUATION => {
+                return Err("ws continuation frame not supported".into());
+            }
+            TEXT => {
                 //println!("ws body {} bytes, as str: {}", rn, header.payload_str());
                 println!("ws body {} bytes", rn);
                 rx.send(text_message(header.payload_str())).await?;
             }
-            FrameKind::Binary => {
+            BINARY => {
                 println!("ws body is binary frame of size {}", header.payload_len);
                 rx.send(binary_message(&header.payload)).await?;
             }
-            FrameKind::Close => {
+            CLOSE => {
                 println!("ws close");
                 rx.send(close_message()).await?;
                 break;
             }
-            FrameKind::Ping => {
+            PING => {
                 println!("ws ping");
                 rx.send(header.to_pong()).await?;
             }
-            FrameKind::Pong => println!("ws pong"),
-            FrameKind::Continuation => {
-                return Err("ws continuation frame not supported".into());
-            }
-            FrameKind::Reserved(opcode) => {
-                return Err(format!("reserved ws frame opcode {}", opcode).into());
+            PONG => println!("ws pong"),
+            _ => {
+                return Err(format!("reserved ws frame opcode {}", header.opcode).into());
             }
         }
     }
-
     Ok(())
 }
 
@@ -100,14 +97,7 @@ async fn write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -> i
 
 #[derive(Debug)]
 struct Header {
-    #[allow(dead_code)]
     fin: bool,
-    #[allow(dead_code)]
-    rsv1: bool,
-    #[allow(dead_code)]
-    rsv2: bool,
-    #[allow(dead_code)]
-    rsv3: bool,
     rsv: u8,
     mask: bool,
     opcode: u8,
@@ -116,23 +106,19 @@ struct Header {
     payload: Vec<u8>,
 }
 
-enum FrameKind {
-    Continuation,
-    Text,
-    Binary,
-    Close,
-    Ping,
-    Pong,
-    Reserved(u8),
-}
+// data frame types
+const CONTINUATION: u8 = 0;
+const TEXT: u8 = 1;
+const BINARY: u8 = 2;
+// constrol frame types
+const CLOSE: u8 = 8;
+const PING: u8 = 9;
+const PONG: u8 = 10;
 
 impl Header {
     fn new(byte1: u8, byte2: u8) -> Header {
         Header {
             fin: byte1 & 0b1000_0000u8 != 0,
-            rsv1: byte1 & 0b0100_0000u8 != 0,
-            rsv2: byte1 & 0b0010_0000u8 != 0,
-            rsv3: byte1 & 0b0001_0000u8 != 0,
             rsv: (byte1 & 0b0111_0000u8) >> 4,
             opcode: byte1 & 0b0000_1111u8,
             mask: byte2 & 0b1000_0000u8 != 0,
@@ -178,22 +164,8 @@ impl Header {
             _ => "",
         }
     }
-    fn kind(&self) -> FrameKind {
-        match self.opcode {
-            0 => FrameKind::Continuation,
-            1 => FrameKind::Text,
-            2 => FrameKind::Binary,
-            8 => FrameKind::Close,
-            9 => FrameKind::Ping,
-            0xa => FrameKind::Pong,
-            _ => FrameKind::Reserved(self.opcode),
-        }
-    }
     fn is_control_frame(&self) -> bool {
-        match self.kind() {
-            FrameKind::Continuation | FrameKind::Close | FrameKind::Ping | FrameKind::Pong => true,
-            _ => false,
-        }
+        self.opcode >= CLOSE && self.opcode <= PONG
     }
     fn is_rsv_ok(&self) -> bool {
         // rsv must be 0, when no extension defining RSV meaning has been negotiated
@@ -216,7 +188,7 @@ impl Header {
     }
     fn to_pong(&self) -> Vec<u8> {
         //vec![0b1000_1010u8, 0b00000000u8]
-        create_message(FrameKind::Pong, &self.payload)
+        create_message(PONG, &self.payload)
     }
 }
 
@@ -225,12 +197,11 @@ fn close_message() -> Vec<u8> {
 }
 
 fn text_message(text: &str) -> Vec<u8> {
-    create_message(FrameKind::Text, text.as_bytes())
+    create_message(TEXT, text.as_bytes())
 }
 
-#[allow(dead_code)]
 fn binary_message(data: &[u8]) -> Vec<u8> {
-    create_message(FrameKind::Binary, data)
+    create_message(BINARY, data)
 }
 
 /*
@@ -253,17 +224,8 @@ fn binary_message(data: &[u8]) -> Vec<u8> {
 |                     Payload Data continued ...                |
 +---------------------------------------------------------------+
 */
-fn create_message(kind: FrameKind, body: &[u8]) -> Vec<u8> {
-    let mut first = 0b1000_0000u8;
-    first += match kind {
-        FrameKind::Text => 1,
-        FrameKind::Binary => 2,
-        FrameKind::Close => 8,
-        FrameKind::Ping => 9,
-        FrameKind::Pong => 0xa,
-        _ => 0,
-    };
-    let mut buf = vec![first];
+fn create_message(opcode: u8, body: &[u8]) -> Vec<u8> {
+    let mut buf = vec![0b1000_0000u8 + opcode];
 
     // add peyload length
     let l = body.len();

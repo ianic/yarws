@@ -28,6 +28,7 @@ pub async fn handle(stream: TcpStream) {
 }
 
 async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
+    let mut start_frame = Frame::empty();
     loop {
         // read first two bytes
         let mut buf = [0u8; 2];
@@ -53,13 +54,43 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             frame.set_payload(&buf);
         }
 
-        if !frame.is_ok() {
+        if !frame.is_ok(!start_frame.is_empty()) {
+            println!("frame is not ok");
             break;
+        }
+        if !frame.is_control_frame() {
+            if frame.is_start() {
+                start_frame = frame;
+                println!("start frame");
+                continue;
+            } else if frame.is_end() {
+                println!("end frame");
+                start_frame.append(&frame);
+
+                match start_frame.opcode {
+                    TEXT => {
+                        println!("ws body {} bytes", rn);
+                        rx.send(text_message(start_frame.payload_str())).await?;
+                    }
+                    BINARY => {
+                        println!("ws body is binary frame of size {}", frame.payload_len);
+                        rx.send(binary_message(&start_frame.payload)).await?;
+                    }
+                    _ => {
+                        return Err(format!("reserved ws frame opcode {}", start_frame.opcode).into());
+                    }
+                }
+
+                start_frame = Frame::empty();
+                continue;
+            }
         }
         // decide what to to
         match frame.opcode {
             CONTINUATION => {
-                return Err("ws continuation frame not supported".into());
+                println!("continuation frame");
+                start_frame.append(&frame);
+                //return Err("ws continuation frame not supported".into());
             }
             TEXT => {
                 //println!("ws body {} bytes, as str: {}", rn, header.payload_str());
@@ -127,6 +158,9 @@ impl Frame {
             payload: vec![0; 0],
         }
     }
+    fn empty() -> Frame {
+        Frame::new(0, 0)
+    }
     fn header_continuation_size(&self) -> u8 {
         let mut n: u8 = if self.mask { 4 } else { 0 };
         if self.payload_len >= 126 {
@@ -164,6 +198,9 @@ impl Frame {
             _ => "",
         }
     }
+    fn is_data_frame(&self) -> bool {
+        self.opcode == TEXT || self.opcode == BINARY
+    }
     fn is_control_frame(&self) -> bool {
         self.opcode >= CLOSE && self.opcode <= PONG
     }
@@ -171,23 +208,40 @@ impl Frame {
         // rsv must be 0, when no extension defining RSV meaning has been negotiated
         self.rsv == 0
     }
-    fn is_ok(&self) -> bool {
+    fn is_ok(&self, in_continuation: bool) -> bool {
         if self.is_control_frame() && self.payload_len > 125 {
             return false;
         }
         if self.is_control_frame() && !self.fin {
             return false; // Control frames themselves MUST NOT be fragmented.
         }
-        if self.fin && self.opcode == 0 {
-            return false; // fin frame must have opcode
-        }
-        if !self.fin && self.opcode != 0 {
-            return false; // non fin frame must have continuation opcode
+        if !self.is_control_frame() {
+            if !in_continuation && self.is_part() {
+                return false;
+            }
+            if in_continuation && !self.is_end() && !self.is_part() {
+                return false;
+            }
         }
         self.is_rsv_ok()
     }
+    fn is_start(&self) -> bool {
+        return !self.fin && self.is_data_frame();
+    }
+    fn is_end(&self) -> bool {
+        return self.fin && self.opcode == CONTINUATION;
+    }
+    fn is_part(&self) -> bool {
+        return !self.fin && self.opcode == CONTINUATION;
+    }
+    fn is_empty(&self) -> bool {
+        !self.fin && self.opcode == 0
+    }
     fn to_pong(&self) -> Vec<u8> {
         create_message(PONG, &self.payload)
+    }
+    fn append(&mut self, other: &Frame) {
+        self.payload.extend_from_slice(&other.payload);
     }
 }
 

@@ -16,7 +16,6 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<TcpStream> {
             0 => break, // eof
             2 => break, // empty line \r\n = end of header line
             _n => header.parse(&line),
-            //            _ => break,
         }
     }
 
@@ -66,7 +65,10 @@ impl Header {
     }
 
     fn is_ws_upgrade(&self) -> bool {
-        self.connection == "Upgrade" && self.upgrade == "websocket" && self.version == "13" && self.key.len() > 0
+        self.connection == "Upgrade"
+            && (self.upgrade == "websocket" || self.upgrade == "WebSocket")
+            && self.version == "13"
+            && self.key.len() > 0
     }
 
     fn upgrade_response(&self) -> String {

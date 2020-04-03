@@ -9,7 +9,7 @@ mod ws;
 
 #[tokio::main]
 async fn main() {
-    let mut listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    let mut listener = TcpListener::bind("127.0.0.1:9001").await.unwrap();
 
     let server = {
         async move {

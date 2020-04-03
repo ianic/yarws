@@ -36,6 +36,7 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             }
             return Err(Box::new(e));
         }
+        //println!("1: {:02x?}", buf);
 
         let mut header = Header::new(buf[0], buf[1]);
         let rn = header.read_next() as usize;
@@ -43,6 +44,7 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             let mut buf = vec![0u8; rn];
             input.read_exact(&mut buf).await?;
             header.set_header(&buf);
+            //println!("2: {:02x?}", buf);
         }
 
         let rn = header.payload_len as usize;
@@ -50,17 +52,27 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             let mut buf = vec![0u8; rn];
             input.read_exact(&mut buf).await?;
             header.set_payload(&buf);
+            //println!("3: {:02x?}", buf);
         }
 
+        if !header.is_ok() {
+            break;
+        }
+        //println!("3 header: {:?}", header);
         match header.kind() {
             FrameKind::Text => {
-                println!("ws body {} bytes, as str: {}", rn, header.payload_str());
+                //println!("ws body {} bytes, as str: {}", rn, header.payload_str());
+                println!("ws body {} bytes", rn);
                 rx.send(text_message(header.payload_str())).await?;
             }
-            FrameKind::Binary => println!("ws body is binary frame of size {}", header.payload_len),
+            FrameKind::Binary => {
+                println!("ws body is binary frame of size {}", header.payload_len);
+                rx.send(binary_message(&header.payload)).await?;
+            }
             FrameKind::Close => {
                 println!("ws close");
                 rx.send(close_message()).await?;
+                break;
             }
             FrameKind::Ping => {
                 println!("ws ping");
@@ -86,6 +98,7 @@ async fn write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -> i
     Ok(())
 }
 
+#[derive(Debug)]
 struct Header {
     #[allow(dead_code)]
     fin: bool,
@@ -95,6 +108,7 @@ struct Header {
     rsv2: bool,
     #[allow(dead_code)]
     rsv3: bool,
+    rsv: u8,
     mask: bool,
     opcode: u8,
     payload_len: u64,
@@ -119,6 +133,7 @@ impl Header {
             rsv1: byte1 & 0b0100_0000u8 != 0,
             rsv2: byte1 & 0b0010_0000u8 != 0,
             rsv3: byte1 & 0b0001_0000u8 != 0,
+            rsv: (byte1 & 0b0111_0000u8) >> 4,
             opcode: byte1 & 0b0000_1111u8,
             mask: byte2 & 0b1000_0000u8 != 0,
             payload_len: (byte2 & 0b0111_1111u8) as u64,
@@ -132,7 +147,7 @@ impl Header {
             n += 2;
         }
         if self.payload_len == 127 {
-            n += 4;
+            n += 6;
         }
         n
     }
@@ -173,6 +188,31 @@ impl Header {
             0xa => FrameKind::Pong,
             _ => FrameKind::Reserved(self.opcode),
         }
+    }
+    fn is_control_frame(&self) -> bool {
+        match self.kind() {
+            FrameKind::Continuation | FrameKind::Close | FrameKind::Ping | FrameKind::Pong => true,
+            _ => false,
+        }
+    }
+    fn is_rsv_ok(&self) -> bool {
+        // rsv must be 0, when no extension defining RSV meaning has been negotiated
+        self.rsv == 0
+    }
+    fn is_ok(&self) -> bool {
+        if self.is_control_frame() && self.payload_len > 125 {
+            return false;
+        }
+        if self.is_control_frame() && !self.fin {
+            return false; // Control frames themselves MUST NOT be fragmented.
+        }
+        if self.fin && self.opcode == 0 {
+            return false; // fin frame must have opcode
+        }
+        if !self.fin && self.opcode != 0 {
+            return false; // non fin frame must have continuation opcode
+        }
+        self.is_rsv_ok()
     }
     fn to_pong(&self) -> Vec<u8> {
         //vec![0b1000_1010u8, 0b00000000u8]

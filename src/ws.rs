@@ -30,57 +30,66 @@ pub async fn handle(hr: http::Response) {
     });
 }
 
+async fn read_payload(input: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> Result<(), io::Error> {
+    let pl = frame.payload_len as usize;
+    if pl > 0 {
+        let mut buf = vec![0u8; pl];
+        input.read_exact(&mut buf).await?;
+        frame.set_payload(&buf);
+    }
+    Ok(())
+}
+
+async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> Result<Frame, io::Error> {
+    input.read_exact(&mut buf[0..2]).await?;
+    let mut frame = Frame::new(buf[0], buf[1]);
+    // read rest of the header
+    let hl = frame.header_len() as usize + 2;
+    if hl > 0 {
+        input.read_exact(&mut buf[2..hl]).await?;
+        frame.set_header(&buf[2..hl]);
+    }
+    Ok(frame)
+}
+
 async fn read(
     mut input: ReadHalf<TcpStream>,
     mut rx: Sender<Vec<u8>>,
     deflate_supported: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut continuation = Frame::empty();
-    let mut header_buf = [0u8; 12];
+    let mut header_buf = [0u8; 14];
     loop {
-        // read first two bytes
-        if let Err(e) = input.read_exact(&mut header_buf[0..2]).await {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                break; //tcp closed without ws close handshake
+        let mut frame = match read_header(&mut input, &mut header_buf).await {
+            Ok(f) => f,
+            Err(e) => {
+                if e.kind() == io::ErrorKind::UnexpectedEof {
+                    break; //tcp closed without ws close handshake
+                }
+                return Err(Box::new(e));
             }
-            return Err(Box::new(e));
-        }
-        let mut frame = Frame::new(header_buf[0], header_buf[1]);
-        // read rest of the header
-        let hl = frame.header_len() as usize;
-        if hl > 0 {
-            input.read_exact(&mut header_buf[2..hl]).await?;
-            frame.set_header(&header_buf[2..hl]);
-        }
-        // read payload
-        let pl = frame.payload_len as usize;
-        if pl > 0 {
-            let mut buf = vec![0u8; pl];
-            input.read_exact(&mut buf).await?;
-            frame.set_payload(&buf);
-        }
+        };
+        read_payload(&mut input, &mut frame).await?;
 
-        if !frame.is_valid(deflate_supported, !continuation.is_empty()) {
-            println!("invalid frame {:?}", frame);
-            break;
-        }
-        if !frame.is_control_frame() {
-            if frame.is_start() {
+        frame.validate(deflate_supported, !continuation.is_empty())?;
+        match frame.fragmet() {
+            Fragmet::Start => {
                 continuation = frame;
                 continue;
-            } else if frame.is_continuation() {
+            }
+            Fragmet::Middle => {
                 continuation.append(&frame);
-                if !frame.is_end() {
-                    continue;
-                }
+                continue;
+            }
+            Fragmet::End => {
+                continuation.append(&frame);
                 frame = continuation;
                 continuation = Frame::empty();
             }
+            Fragmet::None => (),
         }
-        if !frame.validate_payload() {
-            println!("invalid payload");
-            break;
-        }
+        frame.validate_payload()?;
+
         // handle message
         match frame.opcode {
             TEXT => {
@@ -142,6 +151,13 @@ const BINARY: u8 = 2;
 const CLOSE: u8 = 8;
 const PING: u8 = 9;
 const PONG: u8 = 10;
+
+enum Fragmet {
+    Start,
+    Middle,
+    End,
+    None,
+}
 
 impl Frame {
     fn new(byte1: u8, byte2: u8) -> Frame {
@@ -209,45 +225,62 @@ impl Frame {
         // rsv must be 0, when no extension defining RSV meaning has been negotiated
         self.rsv == 0
     }
-    fn is_valid(&self, deflate_supported: bool, in_continuation: bool) -> bool {
+    fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), Box<dyn Error>> {
         if self.is_control_frame() && self.payload_len > 125 {
-            return false;
+            return Err(format!("too log control frame len: {}", self.payload_len).into());
         }
         if self.is_control_frame() && !self.fin {
-            return false; // Control frames themselves MUST NOT be fragmented.
+            return Err(format!("fragmented control frame").into());
         }
         if !self.is_control_frame() {
-            if !in_continuation && self.is_part() {
-                return false;
+            if !in_continuation && self.opcode == CONTINUATION {
+                return Err(format!("wrong continuation frame").into());
             }
-            if in_continuation && !self.is_end() && !self.is_part() {
-                return false;
+            if in_continuation && self.opcode != CONTINUATION {
+                return Err(format!("wrong continuation frame").into());
             }
         }
-        self.is_rsv_ok(deflate_supported)
+        if !self.is_rsv_ok(deflate_supported) {
+            return Err(format!("wrong rsv").into());
+        }
+        Ok(())
     }
-    fn validate_payload(&mut self) -> bool {
+    fn validate_payload(&mut self) -> Result<(), Box<dyn Error>> {
         if !self.inflate() {
-            println!("undeflate failed");
-            return false;
+            return Err(format!("inflate failed").into());
         }
         if self.opcode != TEXT {
-            return true;
+            return Ok(());
         }
-        str::from_utf8(&self.payload).is_ok()
+        if let Err(e) = str::from_utf8(&self.payload) {
+            return Err(format!("payload is not valid utf-8 string error: {}", e).into());
+        }
+        Ok(())
     }
-    fn is_start(&self) -> bool {
-        !self.fin && self.is_data_frame()
+    fn fragmet(&self) -> Fragmet {
+        if !self.fin && self.is_data_frame() {
+            return Fragmet::Start;
+        }
+        if !self.fin && self.opcode == CONTINUATION {
+            return Fragmet::Middle;
+        }
+        if self.fin && self.opcode == CONTINUATION {
+            return Fragmet::End;
+        }
+        Fragmet::None
     }
-    fn is_end(&self) -> bool {
-        self.fin && self.opcode == CONTINUATION
-    }
-    fn is_part(&self) -> bool {
-        !self.fin && self.opcode == CONTINUATION
-    }
-    fn is_continuation(&self) -> bool {
-        self.opcode == CONTINUATION
-    }
+    // fn is_start(&self) -> bool {
+    //     !self.fin && self.is_data_frame()
+    // }
+    // fn is_end(&self) -> bool {
+    //     self.fin && self.opcode == CONTINUATION
+    // }
+    // fn is_part(&self) -> bool {
+    //     !self.fin && self.opcode == CONTINUATION
+    // }
+    // fn is_continuation(&self) -> bool {
+    //     self.opcode == CONTINUATION
+    // }
     fn is_empty(&self) -> bool {
         !self.fin && self.opcode == 0
     }

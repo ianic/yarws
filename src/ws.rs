@@ -1,3 +1,5 @@
+use crate::http;
+use inflate::inflate_bytes;
 use std::error::Error;
 use std::str;
 use tokio;
@@ -8,9 +10,10 @@ use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-pub async fn handle(stream: TcpStream) {
+pub async fn handle(hr: http::Response) {
     println!("ws open");
-    let (input, output) = io::split(stream);
+    let deflate_supported = hr.deflate_supported;
+    let (input, output) = io::split(hr.stream);
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
 
     spawn(async move {
@@ -20,14 +23,18 @@ pub async fn handle(stream: TcpStream) {
         println!("write half closed");
     });
     spawn(async move {
-        if let Err(e) = read(input, tx).await {
+        if let Err(e) = read(input, tx, deflate_supported).await {
             println!("ws_read error {:?}", e);
         }
         println!("read half closed");
     });
 }
 
-async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
+async fn read(
+    mut input: ReadHalf<TcpStream>,
+    mut rx: Sender<Vec<u8>>,
+    deflate_supported: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut continuation = Frame::empty();
     // TODO izbjegni kreiranje novih buffera za svaku poruku
     loop {
@@ -55,61 +62,41 @@ async fn read(mut input: ReadHalf<TcpStream>, mut rx: Sender<Vec<u8>>) -> Result
             frame.set_payload(&buf);
         }
 
-        if !frame.is_ok(!continuation.is_empty()) {
-            println!("frame is not ok");
+        if !frame.is_valid(deflate_supported, !continuation.is_empty()) {
+            println!("invalid frame {:?}", frame);
             break;
         }
-
         if !frame.is_control_frame() {
             if frame.is_start() {
                 continuation = frame;
-                println!("start frame");
                 continue;
-            } else if frame.is_end() {
-                println!("end frame");
+            } else if frame.is_continuation() {
                 continuation.append(&frame);
-                if !continuation.is_valid_payload() {
-                    break;
+                if !frame.is_end() {
+                    continue;
                 }
-                match continuation.opcode {
-                    TEXT => {
-                        println!("ws body {} bytes", rn);
-                        rx.send(text_message(continuation.payload_str())).await?;
-                    }
-                    BINARY => {
-                        println!("ws body is binary frame of size {}", frame.payload_len);
-                        rx.send(binary_message(&continuation.payload)).await?;
-                    }
-                    _ => {
-                        return Err(format!("reserved ws frame opcode {}", continuation.opcode).into());
-                    }
-                }
-
+                frame = continuation;
                 continuation = Frame::empty();
-                continue;
-            } else if frame.opcode == CONTINUATION {
-                continuation.append(&frame);
-                continue;
-            }
-            if !frame.is_valid_payload() {
-                break;
             }
         }
-        // decide what to to
+        if !frame.validate_payload() {
+            println!("invalid payload");
+            break;
+        }
+        // handle message
         match frame.opcode {
-            CONTINUATION => {
-                //TODO: dovdje ne moze doci
-                println!("continuation frame");
-                continuation.append(&frame);
-                //return Err("ws continuation frame not supported".into());
-            }
             TEXT => {
-                //println!("ws body {} bytes, as str: {}", rn, header.payload_str());
-                println!("ws body {} bytes", rn);
+                //println!("ws body {} bytes, as str: {}", frame.payload_len, frame.payload_str());
+                println!("ws body {} bytes", frame.payload_len);
                 rx.send(text_message(frame.payload_str())).await?;
             }
             BINARY => {
-                println!("ws body is binary frame of size {}", frame.payload_len);
+                println!(
+                    "ws body is binary frame of len before: {}, after: {}, capacity: {}",
+                    frame.payload_len,
+                    frame.payload.len(),
+                    frame.payload.capacity()
+                );
                 rx.send(binary_message(&frame.payload)).await?;
             }
             CLOSE => {
@@ -140,6 +127,7 @@ async fn write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -> i
 #[derive(Debug)]
 struct Frame {
     fin: bool,
+    rsv1: bool,
     rsv: u8,
     mask: bool,
     opcode: u8,
@@ -161,6 +149,7 @@ impl Frame {
     fn new(byte1: u8, byte2: u8) -> Frame {
         Frame {
             fin: byte1 & 0b1000_0000u8 != 0,
+            rsv1: byte1 & 0b0100_0000u8 != 0,
             rsv: (byte1 & 0b0111_0000u8) >> 4,
             opcode: byte1 & 0b0000_1111u8,
             mask: byte2 & 0b1000_0000u8 != 0,
@@ -215,11 +204,14 @@ impl Frame {
     fn is_control_frame(&self) -> bool {
         self.opcode >= CLOSE && self.opcode <= PONG
     }
-    fn is_rsv_ok(&self) -> bool {
+    fn is_rsv_ok(&self, deflate_supported: bool) -> bool {
+        if deflate_supported {
+            return self.rsv == 0 || self.rsv == 4;
+        }
         // rsv must be 0, when no extension defining RSV meaning has been negotiated
         self.rsv == 0
     }
-    fn is_ok(&self, in_continuation: bool) -> bool {
+    fn is_valid(&self, deflate_supported: bool, in_continuation: bool) -> bool {
         if self.is_control_frame() && self.payload_len > 125 {
             return false;
         }
@@ -234,22 +226,29 @@ impl Frame {
                 return false;
             }
         }
-        self.is_rsv_ok()
+        self.is_rsv_ok(deflate_supported)
     }
-    fn is_valid_payload(&self) -> bool {
+    fn validate_payload(&mut self) -> bool {
+        if !self.inflate() {
+            println!("undeflate failed");
+            return false;
+        }
         if self.opcode != TEXT {
             return true;
         }
-        return str::from_utf8(&self.payload).is_ok();
+        str::from_utf8(&self.payload).is_ok()
     }
     fn is_start(&self) -> bool {
-        return !self.fin && self.is_data_frame();
+        !self.fin && self.is_data_frame()
     }
     fn is_end(&self) -> bool {
-        return self.fin && self.opcode == CONTINUATION;
+        self.fin && self.opcode == CONTINUATION
     }
     fn is_part(&self) -> bool {
-        return !self.fin && self.opcode == CONTINUATION;
+        !self.fin && self.opcode == CONTINUATION
+    }
+    fn is_continuation(&self) -> bool {
+        self.opcode == CONTINUATION
     }
     fn is_empty(&self) -> bool {
         !self.fin && self.opcode == 0
@@ -258,7 +257,23 @@ impl Frame {
         create_message(PONG, &self.payload)
     }
     fn append(&mut self, other: &Frame) {
+        self.payload_len = self.payload_len + other.payload_len;
         self.payload.extend_from_slice(&other.payload);
+    }
+    fn inflate(&mut self) -> bool {
+        if !self.rsv1 || self.payload_len == 0 {
+            return true;
+        }
+        match inflate_bytes(&self.payload) {
+            Ok(p) => {
+                self.payload = p;
+                true
+            }
+            Err(e) => {
+                println!("decompress error {:?}", e);
+                false
+            }
+        }
     }
 }
 
@@ -318,6 +333,8 @@ fn create_message(opcode: u8, body: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miniz_oxide::deflate::compress_to_vec;
+    use miniz_oxide::inflate::decompress_to_vec;
     #[test]
     fn test_text_message() {
         let buf = text_message("abc");
@@ -330,5 +347,25 @@ mod tests {
         assert_eq!(0xaf, buf[3]); // 175 is body length
 
         //println!("{:02x?}", buf);
+    }
+    #[test]
+    fn test_compress_decompress() {
+        let data = "hello world";
+        let compressed = compress_to_vec(data.as_bytes(), 6);
+        let decompressed = decompress_to_vec(compressed.as_slice()).expect("Failed to decompress!");
+        assert_eq!(data, str::from_utf8(&decompressed).unwrap());
+        //println!("{:02x?}", data);
+        //println!("{:02x?}", decompressed);
+    }
+    #[test]
+    fn frame_inflate() {
+        let mut f = Frame::new(0, 0);
+        f.rsv1 = true;
+        f.rsv = 4;
+        f.payload_len = 7;
+        f.payload = vec![0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00];
+        //f.payload = vec![0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00, 0x00, 0xff, 0xff];
+        assert_eq!(true, f.inflate());
+        assert_eq!("Hello", f.payload_str());
     }
 }

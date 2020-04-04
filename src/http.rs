@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
-pub async fn upgrade(mut stream: TcpStream) -> io::Result<TcpStream> {
+pub async fn upgrade(mut stream: TcpStream) -> io::Result<Response> {
     let mut rdr = io::BufReader::new(&mut stream);
     let mut header = Header::new();
     loop {
@@ -21,11 +21,20 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<TcpStream> {
 
     if header.is_ws_upgrade() {
         stream.write_all(header.upgrade_response().as_bytes()).await?;
-        return Ok(stream);
+        return Ok(Response {
+            stream: stream,
+            deflate_supported: header.is_deflate_supported(),
+        });
     }
     const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
     stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
     Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ws upgrade header"))
+}
+
+#[derive(Debug)]
+pub struct Response {
+    pub stream: TcpStream,
+    pub deflate_supported: bool,
 }
 
 #[derive(Debug)]
@@ -47,7 +56,6 @@ impl Header {
             extensions: String::new(),
         }
     }
-
     fn parse(&mut self, line: &str) {
         if let Some((key, value)) = parse_http_header(&line) {
             match key {
@@ -55,28 +63,42 @@ impl Header {
                 "Upgrade" => self.upgrade = value.to_string(),
                 "Sec-WebSocket-Version" => self.version = value.to_string(),
                 "Sec-WebSocket-Key" => self.key = value.to_string(),
-                "Sec-WebSocket-Extensions" => self.extensions = value.to_string(),
+                "Sec-WebSocket-Extensions" => self.add_extensions(value),
                 //"Host"
                 //"Origin"
-                _ => (),
                 //_ => println!("other header: '{}' => '{}'", key, value),
+                _ => (),
             }
         }
     }
-
+    fn add_extensions(&mut self, ex: &str) {
+        if !self.extensions.is_empty() {
+            self.extensions.push_str(", ");
+        }
+        self.extensions.push_str(ex);
+    }
     fn is_ws_upgrade(&self) -> bool {
         self.connection == "Upgrade"
             && (self.upgrade == "websocket" || self.upgrade == "WebSocket")
             && self.version == "13"
             && self.key.len() > 0
     }
-
+    fn is_deflate_supported(&self) -> bool {
+        self.extensions.contains("permessage-deflate")
+    }
     fn upgrade_response(&self) -> String {
         const HEADER: &str =
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ";
         let mut s = HEADER.to_string();
         s.push_str(&ws_accept(&self.key));
-        s.push_str(&"\r\n\r\n");
+        s.push_str(&"\r\n");
+        if self.is_deflate_supported() {
+            s.push_str(
+                "Sec-Websocket-Extensions: permessage-deflate;client_no_context_takeover;server_no_context_takeover",
+            );
+            s.push_str(&"\r\n");
+        }
+        s.push_str(&"\r\n");
         s
     }
 }

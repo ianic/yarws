@@ -36,28 +36,26 @@ async fn read(
     deflate_supported: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut continuation = Frame::empty();
-    // TODO izbjegni kreiranje novih buffera za svaku poruku
+    let mut header_buf = [0u8; 12];
     loop {
         // read first two bytes
-        let mut buf = [0u8; 2];
-        if let Err(e) = input.read_exact(&mut buf).await {
+        if let Err(e) = input.read_exact(&mut header_buf[0..2]).await {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 break; //tcp closed without ws close handshake
             }
             return Err(Box::new(e));
         }
-        let mut frame = Frame::new(buf[0], buf[1]);
+        let mut frame = Frame::new(header_buf[0], header_buf[1]);
         // read rest of the header
-        let rn = frame.header_continuation_size() as usize;
-        if rn > 0 {
-            let mut buf = vec![0u8; rn];
-            input.read_exact(&mut buf).await?;
-            frame.set_header_continuation(&buf);
+        let hl = frame.header_len() as usize;
+        if hl > 0 {
+            input.read_exact(&mut header_buf[2..hl]).await?;
+            frame.set_header(&header_buf[2..hl]);
         }
         // read payload
-        let rn = frame.payload_len as usize;
-        if rn > 0 {
-            let mut buf = vec![0u8; rn];
+        let pl = frame.payload_len as usize;
+        if pl > 0 {
+            let mut buf = vec![0u8; pl];
             input.read_exact(&mut buf).await?;
             frame.set_payload(&buf);
         }
@@ -161,7 +159,7 @@ impl Frame {
     fn empty() -> Frame {
         Frame::new(0, 0)
     }
-    fn header_continuation_size(&self) -> u8 {
+    fn header_len(&self) -> u8 {
         let mut n: u8 = if self.mask { 4 } else { 0 };
         if self.payload_len >= 126 {
             n += 2;
@@ -171,7 +169,7 @@ impl Frame {
         }
         n
     }
-    fn set_header_continuation(&mut self, buf: &[u8]) {
+    fn set_header(&mut self, buf: &[u8]) {
         let mask_start = buf.len() - 4;
         if mask_start == 8 {
             let bytes: [u8; 8] = [buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]];

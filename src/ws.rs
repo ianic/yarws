@@ -31,23 +31,28 @@ pub async fn handle(hr: http::Response) {
 }
 
 async fn read_payload(input: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> Result<(), io::Error> {
-    let pl = frame.payload_len as usize;
-    if pl > 0 {
-        let mut buf = vec![0u8; pl];
+    let l = frame.payload_len as usize;
+    if l > 0 {
+        let mut buf = vec![0u8; l];
         input.read_exact(&mut buf).await?;
-        frame.set_payload(&buf);
+        frame.set_payload(buf.to_vec());
     }
     Ok(())
 }
 
 async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> Result<Frame, io::Error> {
-    input.read_exact(&mut buf[0..2]).await?;
+    if let Err(e) = input.read_exact(&mut buf[0..2]).await {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            return Ok(Frame::empty());
+        }
+        return Err(e);
+    }
     let mut frame = Frame::new(buf[0], buf[1]);
-    // read rest of the header
-    let hl = frame.header_len() as usize + 2;
-    if hl > 0 {
-        input.read_exact(&mut buf[2..hl]).await?;
-        frame.set_header(&buf[2..hl]);
+
+    if let Some(l) = frame.header_len() {
+        let b = &mut buf[2..l + 2];
+        input.read_exact(b).await?;
+        frame.set_header(b);
     }
     Ok(frame)
 }
@@ -60,15 +65,10 @@ async fn read(
     let mut continuation = Frame::empty();
     let mut header_buf = [0u8; 14];
     loop {
-        let mut frame = match read_header(&mut input, &mut header_buf).await {
-            Ok(f) => f,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    break; //tcp closed without ws close handshake
-                }
-                return Err(Box::new(e));
-            }
-        };
+        let mut frame = read_header(&mut input, &mut header_buf).await?;
+        if frame.is_empty() {
+            break;
+        }
         read_payload(&mut input, &mut frame).await?;
 
         frame.validate(deflate_supported, !continuation.is_empty())?;
@@ -175,15 +175,19 @@ impl Frame {
     fn empty() -> Frame {
         Frame::new(0, 0)
     }
-    fn header_len(&self) -> u8 {
-        let mut n: u8 = if self.mask { 4 } else { 0 };
+    // length of the rest of the header after first two bytes
+    fn header_len(&self) -> Option<usize> {
+        if !self.mask && self.payload_len < 126 {
+            return None;
+        }
+        let mut n: usize = if self.mask { 4 } else { 0 };
         if self.payload_len >= 126 {
             n += 2;
+            if self.payload_len == 127 {
+                n += 6;
+            }
         }
-        if self.payload_len == 127 {
-            n += 6;
-        }
-        n
+        Some(n)
     }
     fn set_header(&mut self, buf: &[u8]) {
         let mask_start = buf.len() - 4;
@@ -199,12 +203,16 @@ impl Frame {
             self.masking_key[i] = buf[mask_start + i];
         }
     }
-    fn set_payload(&mut self, buf: &[u8]) {
-        let mut decoded = vec![0u8; self.payload_len as usize];
-        for (i, b) in buf.iter().enumerate() {
-            decoded[i] = b ^ self.masking_key[i % 4];
+    fn set_payload(&mut self, mut payload: Vec<u8>) {
+        if self.mask {
+            // unmask payload
+            // loop through the octets of ENCODED and XOR the octet with the (i modulo 4)th octet of MASK
+            // ref: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers
+            for (i, b) in payload.iter_mut().enumerate() {
+                *b = *b ^ self.masking_key[i % 4];
+            }
         }
-        self.payload = decoded;
+        self.payload = payload;
     }
     fn payload_str(&self) -> &str {
         match str::from_utf8(&self.payload) {

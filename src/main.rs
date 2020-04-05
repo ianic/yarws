@@ -75,6 +75,31 @@ socket.addEventListener('error', function (event) {
 });
 
 
+|Refactoring example
+
+// my first implementation
+    let l = frame.header_len() as usize + 2;
+    if l > 0 {
+        input.read_exact(&mut buf[2..l]).await?;
+        frame.set_header(&buf[2..l]);
+    }
+
+// trying to put l into smaller scope
+    match frame.header_len() as usize + 2 {
+        0 => (),
+        l => {
+            input.read_exact(&mut buf[2..l]).await?;
+            frame.set_header(&buf[2..l]);
+        }
+    }
+
+// after refactoring header_len to return Option
+    if let Some(l) = frame.header_len2() {
+        input.read_exact(&mut buf[2..l]).await?;
+        frame.set_header(&buf[2..l]);
+    }
+
+
 ,
       "1.*",
       "2.*",

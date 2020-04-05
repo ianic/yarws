@@ -6,12 +6,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
-pub async fn upgrade(mut stream: TcpStream) -> io::Result<Response> {
+pub async fn upgrade(mut stream: TcpStream) -> io::Result<Upgrade> {
     let mut rdr = io::BufReader::new(&mut stream);
     let mut header = Header::new();
     loop {
         let mut line = String::new();
-        // TODO: sta ako ovdje nikada nista ne posalje blokira mi thread !!!
         match rdr.read_line(&mut line).await? {
             0 => break, // eof
             2 => break, // empty line \r\n = end of header line
@@ -21,7 +20,7 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<Response> {
 
     if header.is_ws_upgrade() {
         stream.write_all(header.upgrade_response().as_bytes()).await?;
-        return Ok(Response {
+        return Ok(Upgrade {
             stream: stream,
             deflate_supported: header.is_deflate_supported(),
         });
@@ -32,7 +31,7 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<Response> {
 }
 
 #[derive(Debug)]
-pub struct Response {
+pub struct Upgrade {
     pub stream: TcpStream,
     pub deflate_supported: bool,
 }

@@ -34,7 +34,7 @@ async fn main() {
                         spawn(async move {
                             match http::upgrade(sock).await {
                                 Err(e) => error!(l, "upgrade"; "error" => format!("{:?}", e)),
-                                Ok(ws_sock) => ws::handle(ws_sock, l).await,
+                                Ok(u) => ws::handle(u, l).await,
                             }
                         });
                     }

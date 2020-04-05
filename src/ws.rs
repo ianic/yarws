@@ -10,11 +10,10 @@ use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-pub async fn handle(hr: http::Response, log: slog::Logger) {
-    let deflate_supported = hr.deflate_supported;
-    let (input, output) = io::split(hr.stream);
-    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+pub async fn handle(hu: http::Upgrade, log: slog::Logger) {
     debug!(log, "open");
+    let (input, output) = io::split(hu.stream);
+    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
 
     let wl = log.clone();
     spawn(async move {
@@ -23,7 +22,9 @@ pub async fn handle(hr: http::Response, log: slog::Logger) {
         }
         debug!(wl, "write half closed");
     });
+
     let rl = log.clone();
+    let deflate_supported = hu.deflate_supported;
     spawn(async move {
         if let Err(e) = read(input, tx, deflate_supported, &rl).await {
             warn!(rl, "ws read"; "error" => format!("{:?}", e));

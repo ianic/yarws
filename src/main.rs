@@ -3,26 +3,38 @@ use tokio;
 use tokio::net::TcpListener;
 use tokio::spawn;
 use tokio::stream::StreamExt;
+#[macro_use]
+extern crate slog;
+extern crate slog_async;
+extern crate slog_term;
+use slog::Drain;
 
 mod http;
 mod ws;
 
 #[tokio::main]
 async fn main() {
+    // configure logging
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
+    let log = slog::Logger::root(drain, o!());
+
+    info!(log, "starting");
     let mut listener = TcpListener::bind("127.0.0.1:9001").await.unwrap();
 
     let server = {
         async move {
             let mut incoming = listener.incoming();
-
             while let Some(conn) = incoming.next().await {
                 match conn {
-                    Err(e) => eprintln!("accept failed = {:?}", e),
+                    Err(e) => error!(log, "accept failed"; "error" => format!("{:?}", e)),
                     Ok(sock) => {
+                        let l = log.clone();
                         spawn(async move {
                             match http::upgrade(sock).await {
-                                Err(e) => println!("upgrade error {:?}", e),
-                                Ok(ws_sock) => ws::handle(ws_sock).await,
+                                Err(e) => error!(l, "upgrade"; "error" => format!("{:?}", e)),
+                                Ok(ws_sock) => ws::handle(ws_sock, l).await,
                             }
                         });
                     }

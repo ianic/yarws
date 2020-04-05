@@ -10,27 +10,36 @@ use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-pub async fn handle(hr: http::Response) {
-    println!("ws open");
+pub async fn handle(hr: http::Response, log: slog::Logger) {
     let deflate_supported = hr.deflate_supported;
     let (input, output) = io::split(hr.stream);
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+    debug!(log, "open");
 
+    let wl = log.clone();
     spawn(async move {
         if let Err(e) = write(output, rx).await {
-            println!("ws_write error {:?}", e);
+            warn!(wl, "ws write"; "error" => format!("{:?}", e));
         }
-        println!("write half closed");
+        debug!(wl, "write half closed");
     });
+    let rl = log.clone();
     spawn(async move {
-        if let Err(e) = read(input, tx, deflate_supported).await {
-            println!("ws_read error {:?}", e);
+        if let Err(e) = read(input, tx, deflate_supported, &rl).await {
+            warn!(rl, "ws read"; "error" => format!("{:?}", e));
         }
-        println!("read half closed");
+        debug!(rl, "read half closed");
     });
 }
 
-async fn read_payload(input: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> Result<(), io::Error> {
+async fn write(mut output: WriteHalf<TcpStream>, mut msgs: Receiver<Vec<u8>>) -> io::Result<()> {
+    while let Some(v) = msgs.recv().await {
+        output.write(&v).await?;
+    }
+    Ok(())
+}
+
+async fn read_payload(input: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> io::Result<()> {
     let l = frame.payload_len as usize;
     if l > 0 {
         let mut buf = vec![0u8; l];
@@ -40,7 +49,7 @@ async fn read_payload(input: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> Res
     Ok(())
 }
 
-async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> Result<Frame, io::Error> {
+async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> io::Result<Frame> {
     if let Err(e) = input.read_exact(&mut buf[0..2]).await {
         if e.kind() == io::ErrorKind::UnexpectedEof {
             return Ok(Frame::empty());
@@ -59,8 +68,9 @@ async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> Result<
 
 async fn read(
     mut input: ReadHalf<TcpStream>,
-    mut rx: Sender<Vec<u8>>,
+    mut out: Sender<Vec<u8>>,
     deflate_supported: bool,
+    log: &slog::Logger,
 ) -> Result<(), Box<dyn Error>> {
     let mut continuation = Frame::empty();
     let mut header_buf = [0u8; 14];
@@ -90,43 +100,23 @@ async fn read(
         }
         frame.validate_payload()?;
 
-        // handle message
-        match frame.opcode {
-            TEXT => {
-                //println!("ws body {} bytes, as str: {}", frame.payload_len, frame.payload_str());
-                println!("ws body {} bytes", frame.payload_len);
-                rx.send(text_message(frame.payload_str())).await?;
-            }
-            BINARY => {
-                println!(
-                    "ws body is binary frame of len before: {}, after: {}, capacity: {}",
-                    frame.payload_len,
-                    frame.payload.len(),
-                    frame.payload.capacity()
-                );
-                rx.send(binary_message(&frame.payload)).await?;
-            }
-            CLOSE => {
-                println!("ws close");
-                rx.send(close_message()).await?;
-                break;
-            }
-            PING => {
-                println!("ws ping");
-                rx.send(frame.to_pong()).await?;
-            }
-            PONG => println!("ws pong"),
-            _ => {
-                return Err(format!("reserved ws frame opcode {}", frame.opcode).into());
-            }
+        debug!(log, "message" ;"kind" => frame.kind(), "payload_len" => frame.payload_len);
+        handle_frame(&frame, &mut out).await?;
+        if frame.is_close() {
+            break;
         }
     }
     Ok(())
 }
 
-async fn write(mut output: WriteHalf<TcpStream>, mut rx: Receiver<Vec<u8>>) -> io::Result<()> {
-    while let Some(v) = rx.recv().await {
-        output.write(&v).await?;
+async fn handle_frame(frame: &Frame, out: &mut Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
+    match frame.opcode {
+        TEXT => out.send(text_message(frame.payload_str())).await?,
+        BINARY => out.send(binary_message(&frame.payload)).await?,
+        CLOSE => out.send(close_message()).await?,
+        PING => out.send(frame.to_pong()).await?,
+        PONG => (),
+        _ => return Err(format!("reserved ws frame opcode {}", frame.opcode).into()),
     }
     Ok(())
 }
@@ -141,6 +131,7 @@ struct Frame {
     payload_len: u64,
     masking_key: [u8; 4],
     payload: Vec<u8>,
+    text_payload: String,
 }
 
 // data frame types
@@ -170,6 +161,7 @@ impl Frame {
             payload_len: (byte2 & 0b0111_1111u8) as u64,
             masking_key: [0; 4],
             payload: vec![0; 0],
+            text_payload: String::new(),
         }
     }
     fn empty() -> Frame {
@@ -233,7 +225,7 @@ impl Frame {
         // rsv must be 0, when no extension defining RSV meaning has been negotiated
         self.rsv == 0
     }
-    fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), Box<dyn Error>> {
+    fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), String> {
         if self.is_control_frame() && self.payload_len > 125 {
             return Err(format!("too log control frame len: {}", self.payload_len).into());
         }
@@ -253,15 +245,23 @@ impl Frame {
         }
         Ok(())
     }
-    fn validate_payload(&mut self) -> Result<(), Box<dyn Error>> {
-        if !self.inflate() {
-            return Err(format!("inflate failed").into());
-        }
+    fn validate_payload(&mut self) -> Result<(), String> {
+        self.inflate()?;
         if self.opcode != TEXT {
             return Ok(());
         }
-        if let Err(e) = str::from_utf8(&self.payload) {
-            return Err(format!("payload is not valid utf-8 string error: {}", e).into());
+        match str::from_utf8(&self.payload) {
+            Ok(s) => self.text_payload = s.to_owned(),
+            Err(e) => return Err(format!("payload is not valid utf-8 string error: {}", e)),
+        }
+        Ok(())
+    }
+    fn inflate(&mut self) -> Result<(), String> {
+        if self.rsv1 && self.payload_len > 0 {
+            match inflate_bytes(&self.payload) {
+                Ok(p) => self.payload = p,
+                Err(e) => return Err(format!("failed to inflate payload error: {}", e)),
+            }
         }
         Ok(())
     }
@@ -277,20 +277,11 @@ impl Frame {
         }
         Fragmet::None
     }
-    // fn is_start(&self) -> bool {
-    //     !self.fin && self.is_data_frame()
-    // }
-    // fn is_end(&self) -> bool {
-    //     self.fin && self.opcode == CONTINUATION
-    // }
-    // fn is_part(&self) -> bool {
-    //     !self.fin && self.opcode == CONTINUATION
-    // }
-    // fn is_continuation(&self) -> bool {
-    //     self.opcode == CONTINUATION
-    // }
     fn is_empty(&self) -> bool {
         !self.fin && self.opcode == 0
+    }
+    fn is_close(&self) -> bool {
+        self.opcode == CLOSE
     }
     fn to_pong(&self) -> Vec<u8> {
         create_message(PONG, &self.payload)
@@ -299,19 +290,15 @@ impl Frame {
         self.payload_len = self.payload_len + other.payload_len;
         self.payload.extend_from_slice(&other.payload);
     }
-    fn inflate(&mut self) -> bool {
-        if !self.rsv1 || self.payload_len == 0 {
-            return true;
-        }
-        match inflate_bytes(&self.payload) {
-            Ok(p) => {
-                self.payload = p;
-                true
-            }
-            Err(e) => {
-                println!("decompress error {:?}", e);
-                false
-            }
+
+    fn kind(&self) -> &str {
+        match self.opcode {
+            TEXT => "text",
+            BINARY => "binary",
+            CLOSE => "close",
+            PING => "ping",
+            PONG => "pong",
+            _ => "reserved",
         }
     }
 }
@@ -393,8 +380,6 @@ mod tests {
         let compressed = compress_to_vec(data.as_bytes(), 6);
         let decompressed = decompress_to_vec(compressed.as_slice()).expect("Failed to decompress!");
         assert_eq!(data, str::from_utf8(&decompressed).unwrap());
-        //println!("{:02x?}", data);
-        //println!("{:02x?}", decompressed);
     }
     #[test]
     fn frame_inflate() {
@@ -404,7 +389,7 @@ mod tests {
         f.payload_len = 7;
         f.payload = vec![0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00];
         //f.payload = vec![0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00, 0x00, 0xff, 0xff];
-        assert_eq!(true, f.inflate());
+        assert_eq!(true, f.inflate().is_ok());
         assert_eq!("Hello", f.payload_str());
     }
 }

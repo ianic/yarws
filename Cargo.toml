@@ -14,4 +14,6 @@ tokio = { version = "0.2", features = ["full"] }
 futures = "0.3"
 inflate = "0.4.5"
 miniz_oxide = "0.3.6"
-#failure = "0.1.7"
+slog = { version = "2.5.2", features = ["max_level_trace", "release_max_level_warn"] }
+slog-term = "2.5.0"
+slog-async = "2.5.0"

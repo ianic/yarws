@@ -147,11 +147,4 @@ mod tests {
         let acc = ws_accept("dGhlIHNhbXBsZSBub25jZQ==");
         assert_eq!(acc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
-
-    //#[test]
-    // fn test_frame() {
-    //     let mut buf = vec![0b10000001u8, 0b00000001u8];
-    //     buf.push("a".as_bytes()[0]);
-    //     println!("buf: {:?}", buf)
-    // }
 }

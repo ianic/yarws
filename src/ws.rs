@@ -49,10 +49,10 @@ async fn read_payload(input: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> io:
     Ok(())
 }
 
-async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> io::Result<Frame> {
+async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> io::Result<Option<Frame>> {
     if let Err(e) = input.read_exact(&mut buf[0..2]).await {
         if e.kind() == io::ErrorKind::UnexpectedEof {
-            return Ok(Frame::empty());
+            return Ok(None);
         }
         return Err(e);
     }
@@ -63,7 +63,7 @@ async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> io::Res
         input.read_exact(b).await?;
         frame.set_header(b);
     }
-    Ok(frame)
+    Ok(Some(frame))
 }
 
 async fn read(
@@ -73,18 +73,21 @@ async fn read(
     log: &slog::Logger,
 ) -> Result<(), Box<dyn Error>> {
     let mut continuation = Frame::empty();
+    let mut in_continuation = false;
     let mut header_buf = [0u8; 14];
     loop {
-        let mut frame = read_header(&mut input, &mut header_buf).await?;
-        if frame.is_empty() {
-            break;
-        }
+        let mut frame = match read_header(&mut input, &mut header_buf).await? {
+            Some(f) => f,
+            None => break,
+        };
+
         read_payload(&mut input, &mut frame).await?;
 
-        frame.validate(deflate_supported, !continuation.is_empty())?;
+        frame.validate(deflate_supported, in_continuation)?;
         match frame.fragmet() {
             Fragmet::Start => {
                 continuation = frame;
+                in_continuation = true;
                 continue;
             }
             Fragmet::Middle => {
@@ -94,6 +97,7 @@ async fn read(
             Fragmet::End => {
                 continuation.append(&frame);
                 frame = continuation;
+                in_continuation = false;
                 continuation = Frame::empty();
             }
             Fragmet::None => (),
@@ -276,9 +280,6 @@ impl Frame {
             return Fragmet::End;
         }
         Fragmet::None
-    }
-    fn is_empty(&self) -> bool {
-        !self.fin && self.opcode == 0
     }
     fn is_close(&self) -> bool {
         self.opcode == CLOSE

@@ -8,6 +8,7 @@ extern crate slog;
 extern crate slog_async;
 extern crate slog_term;
 use slog::Drain;
+use slog::Logger;
 
 mod http;
 mod ws;
@@ -18,22 +19,46 @@ async fn main() {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
-    let log = slog::Logger::root(drain, o!());
+    //let log Logger::root(drain, o!());
+    let log = Logger::root(
+        drain,
+        o!("file" =>
+         slog::FnValue(move |info| {
+             format!("{}:{} {}",
+                     info.file(),
+                     info.line(),
+                     info.module(),
+                     )
+         })
+        ),
+    );
 
-    info!(log, "starting");
-    let mut listener = TcpListener::bind("127.0.0.1:9001").await.unwrap();
+    let addr = "127.0.0.1:9001";
+
+    let clog = log.new(o!("addr" => addr));
+    let mut listener = match TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!(clog, "{}", e);
+            return;
+        }
+    };
+    info!(clog, "started");
+
+    let mut conn_no = 0;
 
     let server = {
         async move {
             let mut incoming = listener.incoming();
             while let Some(conn) = incoming.next().await {
                 match conn {
-                    Err(e) => error!(log, "accept failed"; "error" => format!("{:?}", e)),
+                    Err(e) => error!(log, "accept error: {}", e),
                     Ok(sock) => {
-                        let l = log.clone();
+                        conn_no += 1;
+                        let l = log.new(o!("conn" => conn_no));
                         spawn(async move {
                             match http::upgrade(sock).await {
-                                Err(e) => error!(l, "upgrade"; "error" => format!("{:?}", e)),
+                                Err(e) => error!(l, "upgrade error: {}", e),
                                 Ok(u) => ws::handle(u, l).await,
                             }
                         });

@@ -72,33 +72,32 @@ async fn read(
     deflate_supported: bool,
     log: &slog::Logger,
 ) -> Result<(), Box<dyn Error>> {
-    let mut continuation = Frame::empty();
-    let mut in_continuation = false;
+    let mut fragmet: Option<Frame> = None;
     let mut header_buf = [0u8; 14];
     loop {
         let mut frame = match read_header(&mut input, &mut header_buf).await? {
             Some(f) => f,
             None => break,
         };
-
         read_payload(&mut input, &mut frame).await?;
 
-        frame.validate(deflate_supported, in_continuation)?;
+        frame.validate(deflate_supported, fragmet.is_some())?;
         match frame.fragmet() {
             Fragmet::Start => {
-                continuation = frame;
-                in_continuation = true;
+                fragmet = Some(frame);
                 continue;
             }
             Fragmet::Middle => {
-                continuation.append(&frame);
+                let mut f = fragmet.unwrap();
+                f.append(&frame);
+                fragmet = Some(f);
                 continue;
             }
             Fragmet::End => {
-                continuation.append(&frame);
-                frame = continuation;
-                in_continuation = false;
-                continuation = Frame::empty();
+                let mut f = fragmet.unwrap();
+                f.append(&frame);
+                frame = f;
+                fragmet = None;
             }
             Fragmet::None => (),
         }
@@ -168,9 +167,7 @@ impl Frame {
             text_payload: String::new(),
         }
     }
-    fn empty() -> Frame {
-        Frame::new(0, 0)
-    }
+
     // length of the rest of the header after first two bytes
     fn header_len(&self) -> Option<usize> {
         if !self.mask && self.payload_len < 126 {
@@ -185,6 +182,7 @@ impl Frame {
         }
         Some(n)
     }
+
     fn set_header(&mut self, buf: &[u8]) {
         let mask_start = buf.len() - 4;
         if mask_start == 8 {
@@ -199,6 +197,7 @@ impl Frame {
             self.masking_key[i] = buf[mask_start + i];
         }
     }
+
     fn set_payload(&mut self, mut payload: Vec<u8>) {
         if self.mask {
             // unmask payload
@@ -210,18 +209,22 @@ impl Frame {
         }
         self.payload = payload;
     }
+
     fn payload_str(&self) -> &str {
         match str::from_utf8(&self.payload) {
             Ok(v) => v,
             _ => "",
         }
     }
+
     fn is_data_frame(&self) -> bool {
         self.opcode == TEXT || self.opcode == BINARY
     }
+
     fn is_control_frame(&self) -> bool {
         self.opcode >= CLOSE && self.opcode <= PONG
     }
+
     fn is_rsv_ok(&self, deflate_supported: bool) -> bool {
         if deflate_supported {
             return self.rsv == 0 || self.rsv == 4;
@@ -229,6 +232,7 @@ impl Frame {
         // rsv must be 0, when no extension defining RSV meaning has been negotiated
         self.rsv == 0
     }
+
     fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), String> {
         if self.is_control_frame() && self.payload_len > 125 {
             return Err(format!("too log control frame len: {}", self.payload_len).into());
@@ -249,6 +253,7 @@ impl Frame {
         }
         Ok(())
     }
+
     fn validate_payload(&mut self) -> Result<(), String> {
         self.inflate()?;
         if self.opcode != TEXT {
@@ -260,6 +265,7 @@ impl Frame {
         }
         Ok(())
     }
+
     fn inflate(&mut self) -> Result<(), String> {
         if self.rsv1 && self.payload_len > 0 {
             match inflate_bytes(&self.payload) {
@@ -269,6 +275,7 @@ impl Frame {
         }
         Ok(())
     }
+
     fn fragmet(&self) -> Fragmet {
         if !self.fin && self.is_data_frame() {
             return Fragmet::Start;
@@ -281,15 +288,19 @@ impl Frame {
         }
         Fragmet::None
     }
+
     fn is_close(&self) -> bool {
         self.opcode == CLOSE
     }
+
     fn to_pong(&self) -> Vec<u8> {
         create_message(PONG, &self.payload)
     }
-    fn append(&mut self, other: &Frame) {
+
+    fn append(&mut self, other: &Frame) -> &Frame {
         self.payload_len = self.payload_len + other.payload_len;
         self.payload.extend_from_slice(&other.payload);
+        self
     }
 
     fn kind(&self) -> &str {

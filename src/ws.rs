@@ -3,55 +3,110 @@ use inflate::inflate_bytes;
 use std::error::Error;
 use std::str;
 use tokio;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf};
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+#[derive(Debug)]
+struct Msg {
+    is_binary: bool,
+    binary: Vec<u8>,
+    text: String,
+}
+impl Msg {
+    fn as_raw(&self) -> Vec<u8> {
+        if self.is_binary {
+            return binary_message(&self.binary);
+        }
+        text_message(&self.text)
+    }
+}
+
 pub async fn handle(hu: http::Upgrade, log: slog::Logger) {
     debug!(log, "open");
-    let (input, output) = io::split(hu.stream);
-    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+    let (soc_rx, mut soc_tx) = io::split(hu.stream);
+    let (raw_tx, mut raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+    let (session_tx, session_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+    let (conn_tx, mut conn_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+    let mut raw_tx2 = raw_tx.clone();
 
-    let wl = log.clone();
+    // writes raw ws frames to the tcp socket
+    // raw_rx -> soc_tx
+    let l = log.clone();
     spawn(async move {
-        if let Err(e) = write(output, rx).await {
-            warn!(wl, "ws write"; "error" => format!("{:?}", e));
+        while let Some(v) = raw_rx.recv().await {
+            if let Err(e) = soc_tx.write(&v).await {
+                error!(l, "{}", e);
+                break;
+            }
         }
-        debug!(wl, "write half closed");
+        debug!(l, "write half closed");
     });
 
-    let rl = log.clone();
+    // reads tcp socket, parse incoming stream as ws frames and then into application messages
+    // soc_rx -> raw_tx       - for control frames
+    //        -> session_tx   - for data frames
+    let l = log.clone();
     let deflate_supported = hu.deflate_supported;
     spawn(async move {
-        if let Err(e) = read(input, tx, deflate_supported, &rl).await {
-            warn!(rl, "ws read"; "error" => format!("{:?}", e));
+        if let Err(e) = read(soc_rx, raw_tx, session_tx, deflate_supported, &l).await {
+            error!(l, "{}", e);
         }
-        debug!(rl, "read half closed");
+        debug!(l, "read half closed");
+    });
+
+    // transforms application Msg to raw
+    // conn_rx -> raw_tx
+    let l = log.clone();
+    spawn(async move {
+        while let Some(m) = conn_rx.recv().await {
+            if let Err(e) = raw_tx2.send(m.as_raw()).await {
+                error!(l, "{}", e);
+                break;
+            }
+        }
+        debug!(l, "msg to raw closed");
+    });
+
+    // process application messages
+    // session_rx -> conn_tx
+    let l = log.clone();
+    spawn(async move {
+        if let Err(e) = session(session_rx, conn_tx).await {
+            error!(l, "{}", e);
+        }
+        debug!(l, "session closed");
     });
 }
 
-async fn write(mut output: WriteHalf<TcpStream>, mut msgs: Receiver<Vec<u8>>) -> io::Result<()> {
-    while let Some(v) = msgs.recv().await {
-        output.write(&v).await?;
+// TODO: kako iz session signalizirati close
+async fn session(mut rx: Receiver<Msg>, mut tx: Sender<Msg>) -> Result<(), Box<dyn Error>> {
+    while let Some(m) = rx.recv().await {
+        // some serious processing
+        //m.text = m.text.chars().rev().collect::<String>();
+        // if m.text == "close" {
+        //     break;
+        // }
+        tx.send(m).await?;
     }
     Ok(())
 }
 
-async fn read_payload(input: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> io::Result<()> {
+async fn read_payload(soc_rx: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> io::Result<()> {
     let l = frame.payload_len as usize;
     if l > 0 {
         let mut buf = vec![0u8; l];
-        input.read_exact(&mut buf).await?;
+        soc_rx.read_exact(&mut buf).await?;
         frame.set_payload(buf.to_vec());
     }
     Ok(())
 }
 
-async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> io::Result<Option<Frame>> {
-    if let Err(e) = input.read_exact(&mut buf[0..2]).await {
+async fn read_header(soc_rx: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> io::Result<Option<Frame>> {
+    if let Err(e) = soc_rx.read_exact(&mut buf[0..2]).await {
         if e.kind() == io::ErrorKind::UnexpectedEof {
             return Ok(None);
         }
@@ -61,26 +116,27 @@ async fn read_header(input: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> io::Res
 
     if let Some(l) = frame.header_len() {
         let b = &mut buf[2..l + 2];
-        input.read_exact(b).await?;
+        soc_rx.read_exact(b).await?;
         frame.set_header(b);
     }
     Ok(Some(frame))
 }
 
 async fn read(
-    mut input: ReadHalf<TcpStream>,
-    mut out: Sender<Vec<u8>>,
+    mut soc_rx: ReadHalf<TcpStream>,
+    mut raw_tx: Sender<Vec<u8>>,
+    mut session_tx: Sender<Msg>,
     deflate_supported: bool,
     log: &slog::Logger,
 ) -> Result<(), Box<dyn Error>> {
     let mut fragmet: Option<Frame> = None;
     let mut header_buf = [0u8; 14];
     loop {
-        let mut frame = match read_header(&mut input, &mut header_buf).await? {
+        let mut frame = match read_header(&mut soc_rx, &mut header_buf).await? {
             Some(f) => f,
             None => break,
         };
-        read_payload(&mut input, &mut frame).await?;
+        read_payload(&mut soc_rx, &mut frame).await?;
 
         frame.validate(deflate_supported, fragmet.is_some())?;
         match frame.fragmet() {
@@ -105,20 +161,24 @@ async fn read(
         frame.validate_payload()?;
 
         debug!(log, "message" ;"kind" => frame.kind(), "payload_len" => frame.payload_len);
-        handle_frame(&frame, &mut out).await?;
-        if frame.is_close() {
+        let is_close = frame.is_close();
+        handle_frame(frame, &mut raw_tx, &mut session_tx).await?;
+        if is_close {
             break;
         }
     }
     Ok(())
 }
 
-async fn handle_frame(frame: &Frame, out: &mut Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
+async fn handle_frame(
+    frame: Frame,
+    raw_tx: &mut Sender<Vec<u8>>,
+    session_tx: &mut Sender<Msg>,
+) -> Result<(), Box<dyn Error>> {
     match frame.opcode {
-        TEXT => out.send(text_message(frame.payload_str())).await?,
-        BINARY => out.send(binary_message(&frame.payload)).await?,
-        CLOSE => out.send(close_message()).await?,
-        PING => out.send(frame.to_pong()).await?,
+        TEXT | BINARY => session_tx.send(frame2_msg(frame)).await?,
+        CLOSE => raw_tx.send(close_message()).await?,
+        PING => raw_tx.send(frame.to_pong()).await?,
         PONG => (),
         _ => return Err(format!("reserved ws frame opcode {}", frame.opcode).into()),
     }
@@ -209,13 +269,6 @@ impl Frame {
             }
         }
         self.payload = payload;
-    }
-
-    fn payload_str(&self) -> &str {
-        match str::from_utf8(&self.payload) {
-            Ok(v) => v,
-            _ => "",
-        }
     }
 
     fn is_data_frame(&self) -> bool {
@@ -316,6 +369,14 @@ impl Frame {
     }
 }
 
+fn frame2_msg(frame: Frame) -> Msg {
+    Msg {
+        is_binary: frame.opcode == BINARY,
+        binary: frame.payload,
+        text: frame.text_payload,
+    }
+}
+
 fn close_message() -> Vec<u8> {
     vec![0b1000_1000u8, 0b0000_0000u8]
 }
@@ -403,6 +464,6 @@ mod tests {
         f.payload = vec![0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00];
         //f.payload = vec![0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00, 0x00, 0xff, 0xff];
         assert_eq!(true, f.inflate().is_ok());
-        assert_eq!("Hello", f.payload_str());
+        assert_eq!("Hello", f.text_payload);
     }
 }

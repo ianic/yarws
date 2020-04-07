@@ -73,30 +73,8 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sen
         debug!(l, "msg to raw closed");
     });
 
-    // process application messages
-    // session_rx -> conn_tx
-    // let l = log.clone();
-    // spawn(async move {
-    //     if let Err(e) = session(session_rx, conn_tx).await {
-    //         error!(l, "{}", e);
-    //     }
-    //     debug!(l, "session closed");
-    // });
     (session_rx, conn_tx)
 }
-
-// // TODO: kako iz session signalizirati close
-// async fn session(mut rx: Receiver<Msg>, mut tx: Sender<Msg>) -> Result<(), Box<dyn Error>> {
-//     while let Some(m) = rx.recv().await {
-//         // some serious processing
-//         //m.text = m.text.chars().rev().collect::<String>();
-//         // if m.text == "close" {
-//         //     break;
-//         // }
-//         tx.send(m).await?;
-//     }
-//     Ok(())
-// }
 
 async fn read_payload(soc_rx: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> io::Result<()> {
     let l = frame.payload_len as usize;

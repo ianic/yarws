@@ -1,6 +1,7 @@
 use crate::http;
 use inflate::inflate_bytes;
 use std::error::Error;
+use std::fmt;
 use std::str;
 use tokio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf};
@@ -44,20 +45,16 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sen
                 break;
             }
         }
-        debug!(l, "write half closed");
     });
 
     // reads tcp socket, parse incoming stream as ws frames and then into application messages
     // soc_rx -> raw_tx       - for control frames
     //        -> session_tx   - for data frames
-    let l = log.clone();
-    let deflate_supported = hu.deflate_supported;
-    let raw_ws_tx = raw_tx.clone();
+    let mut conn = Conn::new(hu.deflate_supported, soc_rx, raw_tx.clone(), session_tx, log.clone());
     spawn(async move {
-        if let Err(e) = read(soc_rx, raw_ws_tx, session_tx, deflate_supported, &l).await {
-            error!(l, "{}", e);
+        if let Err(e) = conn.read().await {
+            error!(conn.log, "{}", e);
         }
-        debug!(l, "read half closed");
     });
 
     // transforms application Msg to raw
@@ -71,100 +68,105 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sen
                 break;
             }
         }
-        debug!(l, "msg to raw closed");
     });
 
     (session_rx, conn_tx)
 }
 
-async fn read_payload(soc_rx: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> io::Result<()> {
-    let l = frame.payload_len as usize;
-    if l > 0 {
-        let mut buf = vec![0u8; l];
-        soc_rx.read_exact(&mut buf).await?;
-        frame.set_payload(buf.to_vec());
-    }
-    Ok(())
-}
-
-async fn read_header(soc_rx: &mut ReadHalf<TcpStream>, buf: &mut [u8]) -> io::Result<Option<Frame>> {
-    if let Err(e) = soc_rx.read_exact(&mut buf[0..2]).await {
-        if e.kind() == io::ErrorKind::UnexpectedEof {
-            return Ok(None);
-        }
-        return Err(e);
-    }
-    let mut frame = Frame::new(buf[0], buf[1]);
-
-    if let Some(l) = frame.header_len() {
-        let b = &mut buf[2..l + 2];
-        soc_rx.read_exact(b).await?;
-        frame.set_header(b);
-    }
-    Ok(Some(frame))
-}
-
-async fn read(
-    mut soc_rx: ReadHalf<TcpStream>,
-    mut raw_tx: Sender<Vec<u8>>,
-    mut session_tx: Sender<Msg>,
+struct Conn {
     deflate_supported: bool,
-    log: &slog::Logger,
-) -> Result<(), Box<dyn Error>> {
-    let mut fragmet: Option<Frame> = None;
-    let mut header_buf = [0u8; 14];
-    loop {
-        let mut frame = match read_header(&mut soc_rx, &mut header_buf).await? {
-            Some(f) => f,
-            None => break,
-        };
-        read_payload(&mut soc_rx, &mut frame).await?;
-
-        frame.validate(deflate_supported, fragmet.is_some())?;
-        match frame.fragmet() {
-            Fragmet::Start => {
-                fragmet = Some(frame);
-                continue;
-            }
-            Fragmet::Middle => {
-                let mut f = fragmet.unwrap();
-                f.append(&frame);
-                fragmet = Some(f);
-                continue;
-            }
-            Fragmet::End => {
-                let mut f = fragmet.unwrap();
-                f.append(&frame);
-                frame = f;
-                fragmet = None;
-            }
-            Fragmet::None => (),
-        }
-        frame.validate_payload()?;
-
-        debug!(log, "message" ;"kind" => frame.kind(), "payload_len" => frame.payload_len);
-        let is_close = frame.is_close();
-        handle_frame(frame, &mut raw_tx, &mut session_tx).await?;
-        if is_close {
-            break;
-        }
-    }
-    Ok(())
+    soc_rx: ReadHalf<TcpStream>,
+    raw_tx: Sender<Vec<u8>>,
+    session_tx: Sender<Msg>,
+    log: slog::Logger,
+    header_buf: [u8; 14],
 }
 
-async fn handle_frame(
-    frame: Frame,
-    raw_tx: &mut Sender<Vec<u8>>,
-    session_tx: &mut Sender<Msg>,
-) -> Result<(), Box<dyn Error>> {
-    match frame.opcode {
-        TEXT | BINARY => session_tx.send(frame2_msg(frame)).await?,
-        CLOSE => raw_tx.send(close_message()).await?,
-        PING => raw_tx.send(frame.to_pong()).await?,
-        PONG => (),
-        _ => return Err(format!("reserved ws frame opcode {}", frame.opcode).into()),
+impl Conn {
+    fn new(
+        deflate_supported: bool,
+        soc_rx: ReadHalf<TcpStream>,
+        raw_tx: Sender<Vec<u8>>,
+        session_tx: Sender<Msg>,
+        log: slog::Logger,
+    ) -> Conn {
+        Conn {
+            deflate_supported: deflate_supported,
+            soc_rx: soc_rx,
+            raw_tx: raw_tx,
+            session_tx: session_tx,
+            log: log,
+            header_buf: [0u8; 14],
+        }
     }
-    Ok(())
+
+    async fn read_payload(&mut self, frame: &mut Frame) -> io::Result<()> {
+        let l = frame.payload_len as usize;
+        if l > 0 {
+            let mut buf = vec![0u8; l];
+            self.soc_rx.read_exact(&mut buf).await?;
+            frame.set_payload(buf.to_vec());
+        }
+        Ok(())
+    }
+
+    async fn read_header(&mut self) -> io::Result<Option<Frame>> {
+        if let Err(e) = self.soc_rx.read_exact(&mut self.header_buf[0..2]).await {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                return Ok(None);
+            }
+            return Err(e);
+        }
+        let mut frame = Frame::new(self.header_buf[0], self.header_buf[1]);
+
+        if let Some(l) = frame.header_len() {
+            let b = &mut self.header_buf[2..l + 2];
+            self.soc_rx.read_exact(b).await?;
+            frame.set_header(b);
+        }
+        Ok(Some(frame))
+    }
+
+    async fn read(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut fragment: Option<Frame> = None;
+        loop {
+            let mut frame = match self.read_header().await? {
+                Some(f) => f,
+                None => break,
+            };
+            self.read_payload(&mut frame).await?;
+
+            frame.validate(self.deflate_supported, fragment.is_some())?;
+            if frame.is_fragment() {
+                let (new_frame, new_fragment) = frame.to_fragment(fragment);
+                fragment = new_fragment;
+                match new_frame {
+                    Some(f) => frame = f,
+                    None => continue, // current frame is fragment, wait for more
+                }
+            }
+            frame.validate_payload()?;
+
+            trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len);
+            let is_close = frame.is_close();
+            self.handle_frame(frame).await?;
+            if is_close {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_frame(&mut self, frame: Frame) -> Result<(), Box<dyn Error>> {
+        match frame.opcode.value() {
+            TEXT | BINARY => self.session_tx.send(frame2_msg(frame)).await?,
+            CLOSE => self.raw_tx.send(close_message()).await?,
+            PING => self.raw_tx.send(frame.to_pong()).await?,
+            PONG => (),
+            _ => return Err(format!("reserved ws frame opcode {}", frame.opcode).into()),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -173,7 +175,7 @@ struct Frame {
     rsv1: bool,
     rsv: u8,
     mask: bool,
-    opcode: u8,
+    opcode: Opcode,
     payload_len: u64,
     masking_key: [u8; 4],
     payload: Vec<u8>,
@@ -189,6 +191,59 @@ const CLOSE: u8 = 8;
 const PING: u8 = 9;
 const PONG: u8 = 10;
 
+#[derive(Debug)]
+struct Opcode(u8);
+
+impl Opcode {
+    fn new(opcode: u8) -> Self {
+        Self(opcode)
+    }
+    fn value(&self) -> u8 {
+        self.0
+    }
+    fn data(&self) -> bool {
+        self.0 == TEXT || self.0 == BINARY
+    }
+    fn control(&self) -> bool {
+        self.0 == CLOSE || self.0 == PING || self.0 == PONG
+    }
+    fn continuation(&self) -> bool {
+        self.0 == CONTINUATION
+    }
+    fn text(&self) -> bool {
+        self.0 == TEXT
+    }
+    fn binary(&self) -> bool {
+        self.0 == BINARY
+    }
+    fn close(&self) -> bool {
+        self.0 == CLOSE
+    }
+    // fn ping(&self) -> bool {
+    //     self.0 == 9
+    // }
+    // fn pong(&self) -> bool {
+    //     self.0 == 10
+    //}
+    fn desc(&self) -> &str {
+        match self.0 {
+            CONTINUATION => "continuation",
+            TEXT => "text",
+            BINARY => "binary",
+            CLOSE => "close",
+            PING => "ping",
+            PONG => "pong",
+            _ => "reserved",
+        }
+    }
+}
+
+impl fmt::Display for Opcode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.desc())
+    }
+}
+
 enum Fragmet {
     Start,
     Middle,
@@ -198,11 +253,12 @@ enum Fragmet {
 
 impl Frame {
     fn new(byte1: u8, byte2: u8) -> Frame {
+        let opcode = byte1 & 0b0000_1111u8;
         Frame {
             fin: byte1 & 0b1000_0000u8 != 0,
             rsv1: byte1 & 0b0100_0000u8 != 0,
             rsv: (byte1 & 0b0111_0000u8) >> 4,
-            opcode: byte1 & 0b0000_1111u8,
+            opcode: Opcode::new(opcode),
             mask: byte2 & 0b1000_0000u8 != 0,
             payload_len: (byte2 & 0b0111_1111u8) as u64,
             masking_key: [0; 4],
@@ -253,13 +309,13 @@ impl Frame {
         self.payload = payload;
     }
 
-    fn is_data_frame(&self) -> bool {
-        self.opcode == TEXT || self.opcode == BINARY
-    }
+    // fn is_data_frame(&self) -> bool {
+    //     self.opcode == TEXT || self.opcode == BINARY
+    // }
 
-    fn is_control_frame(&self) -> bool {
-        self.opcode >= CLOSE && self.opcode <= PONG
-    }
+    // fn is_control_frame(&self) -> bool {
+    //     self.opcode >= CLOSE && self.opcode <= PONG
+    // }
 
     fn is_rsv_ok(&self, deflate_supported: bool) -> bool {
         if deflate_supported {
@@ -270,17 +326,17 @@ impl Frame {
     }
 
     fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), String> {
-        if self.is_control_frame() && self.payload_len > 125 {
+        if self.opcode.control() && self.payload_len > 125 {
             return Err(format!("too log control frame len: {}", self.payload_len).into());
         }
-        if self.is_control_frame() && !self.fin {
+        if self.opcode.control() && !self.fin {
             return Err(format!("fragmented control frame").into());
         }
-        if !self.is_control_frame() {
-            if !in_continuation && self.opcode == CONTINUATION {
+        if !self.opcode.control() {
+            if !in_continuation && self.opcode.continuation() {
                 return Err(format!("wrong continuation frame").into());
             }
-            if in_continuation && self.opcode != CONTINUATION {
+            if in_continuation && !self.opcode.continuation() {
                 return Err(format!("wrong continuation frame").into());
             }
         }
@@ -292,7 +348,7 @@ impl Frame {
 
     fn validate_payload(&mut self) -> Result<(), String> {
         self.inflate()?;
-        if self.opcode != TEXT {
+        if !self.opcode.text() {
             return Ok(());
         }
         match str::from_utf8(&self.payload) {
@@ -313,20 +369,43 @@ impl Frame {
     }
 
     fn fragmet(&self) -> Fragmet {
-        if !self.fin && self.is_data_frame() {
+        if !self.fin && self.opcode.data() {
             return Fragmet::Start;
         }
-        if !self.fin && self.opcode == CONTINUATION {
+        if !self.fin && self.opcode.continuation() {
             return Fragmet::Middle;
         }
-        if self.fin && self.opcode == CONTINUATION {
+        if self.fin && self.opcode.continuation() {
             return Fragmet::End;
         }
         Fragmet::None
     }
+    fn is_fragment(&self) -> bool {
+        !(self.fin && !self.opcode.continuation())
+    }
+
+    // if frame is part of the fragmented message it is appended to the current fragment
+    // returns frame, and fragment
+    // if frame is None it is not completed
+    fn to_fragment(self, fragment: Option<Frame>) -> (Option<Frame>, Option<Frame>) {
+        match self.fragmet() {
+            Fragmet::Start => (None, Some(self)),
+            Fragmet::Middle => {
+                let mut f = fragment.unwrap();
+                f.append(&self);
+                (None, Some(f))
+            }
+            Fragmet::End => {
+                let mut f = fragment.unwrap();
+                f.append(&self);
+                (Some(f), None)
+            }
+            Fragmet::None => (Some(self), fragment),
+        }
+    }
 
     fn is_close(&self) -> bool {
-        self.opcode == CLOSE
+        self.opcode.close()
     }
 
     fn to_pong(&self) -> Vec<u8> {
@@ -338,21 +417,10 @@ impl Frame {
         self.payload.extend_from_slice(&other.payload);
         self
     }
-
-    fn kind(&self) -> &str {
-        match self.opcode {
-            TEXT => "text",
-            BINARY => "binary",
-            CLOSE => "close",
-            PING => "ping",
-            PONG => "pong",
-            _ => "reserved",
-        }
-    }
 }
 
 fn frame2_msg(frame: Frame) -> Msg {
-    if frame.opcode == BINARY {
+    if frame.opcode.binary() {
         return Msg::Binary(frame.payload);
     }
     Msg::Text(frame.text_payload)

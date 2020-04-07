@@ -11,18 +11,19 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Debug)]
-pub struct Msg {
-    pub is_binary: bool,
-    pub binary: Vec<u8>,
-    pub text: String,
+pub enum Msg {
+    Binary(Vec<u8>),
+    Text(String),
+    //Close,
 }
 
 impl Msg {
     fn as_raw(&self) -> Vec<u8> {
-        if self.is_binary {
-            return binary_message(&self.binary);
+        match self {
+            Msg::Binary(b) => return binary_message(&b),
+            Msg::Text(t) => text_message(&t),
+            //Msg::Close => close_message(),
         }
-        text_message(&self.text)
     }
 }
 
@@ -351,11 +352,10 @@ impl Frame {
 }
 
 fn frame2_msg(frame: Frame) -> Msg {
-    Msg {
-        is_binary: frame.opcode == BINARY,
-        binary: frame.payload,
-        text: frame.text_payload,
+    if frame.opcode == BINARY {
+        return Msg::Binary(frame.payload);
     }
+    Msg::Text(frame.text_payload)
 }
 
 fn close_message() -> Vec<u8> {

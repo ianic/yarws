@@ -76,14 +76,15 @@ async fn main() {
     server.await;
 }
 
-// TODO: kako iz session signalizirati close
 async fn session(mut rx: Receiver<ws::Msg>, mut tx: Sender<ws::Msg>, log: slog::Logger) -> Result<(), Box<dyn Error>> {
     while let Some(m) = rx.recv().await {
-        // if m.text == "close" {
-        //     m.is_binary = true;
+        // match m {
+        //     ws::Msg::Text(t) => {
+        //         let t = t.chars().rev().collect::<String>();
+        //         tx.send(ws::Msg::Text(t)).await?;
+        //     }
+        //     _ => tx.send(m).await?,
         // }
-        // //some serious processing
-        // m.text = m.text.chars().rev().collect::<String>();
         tx.send(m).await?;
     }
     debug!(log, "session closed");

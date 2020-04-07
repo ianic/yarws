@@ -78,18 +78,32 @@ async fn main() {
     server.await;
 }
 
+#[allow(dead_code)]
 async fn session(mut rx: Receiver<ws::Msg>, mut tx: Sender<ws::Msg>, log: slog::Logger) -> Result<(), Box<dyn Error>> {
     while let Some(m) = rx.recv().await {
-        // match m {
-        //     ws::Msg::Text(t) => {
-        //         let t = t.chars().rev().collect::<String>();
-        //         tx.send(ws::Msg::Text(t)).await?;
-        //     }
-        //     _ => tx.send(m).await?,
-        // }
         tx.send(m).await?;
     }
-    debug!(log, "session closed");
+    trace!(log, "session closed");
+    Ok(())
+}
+
+#[allow(dead_code)]
+async fn reverse_text(
+    mut rx: Receiver<ws::Msg>,
+    mut tx: Sender<ws::Msg>,
+    log: slog::Logger,
+) -> Result<(), Box<dyn Error>> {
+    while let Some(m) = rx.recv().await {
+        let m = match m {
+            ws::Msg::Text(t) => {
+                let t = t.chars().rev().collect::<String>();
+                ws::Msg::Text(t)
+            }
+            _ => m,
+        };
+        tx.send(m).await?;
+    }
+    trace!(log, "session closed");
     Ok(())
 }
 

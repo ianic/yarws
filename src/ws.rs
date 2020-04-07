@@ -28,7 +28,7 @@ impl Msg {
 }
 
 pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sender<Msg>) {
-    debug!(log, "open");
+    trace!(log, "open");
     let (soc_rx, mut soc_tx) = io::split(hu.stream);
     let (raw_tx, mut raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
     let (session_tx, session_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);

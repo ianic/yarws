@@ -9,6 +9,8 @@ extern crate slog_async;
 extern crate slog_term;
 use slog::Drain;
 use slog::Logger;
+use std::error::Error;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 mod http;
 mod ws;
@@ -56,10 +58,14 @@ async fn main() {
                     Ok(sock) => {
                         conn_no += 1;
                         let l = log.new(o!("conn" => conn_no));
+                        let sl = log.new(o!("conn" => conn_no));
                         spawn(async move {
                             match http::upgrade(sock).await {
                                 Err(e) => error!(l, "upgrade error: {}", e),
-                                Ok(u) => ws::handle(u, l).await,
+                                Ok(u) => {
+                                    let (rx, tx) = ws::handle(u, l).await;
+                                    session(rx, tx, sl).await.unwrap();
+                                }
                             }
                         });
                     }
@@ -68,6 +74,20 @@ async fn main() {
         }
     };
     server.await;
+}
+
+// TODO: kako iz session signalizirati close
+async fn session(mut rx: Receiver<ws::Msg>, mut tx: Sender<ws::Msg>, log: slog::Logger) -> Result<(), Box<dyn Error>> {
+    while let Some(m) = rx.recv().await {
+        // if m.text == "close" {
+        //     m.is_binary = true;
+        // }
+        // //some serious processing
+        // m.text = m.text.chars().rev().collect::<String>();
+        tx.send(m).await?;
+    }
+    debug!(log, "session closed");
+    Ok(())
 }
 
 #[cfg(test)]

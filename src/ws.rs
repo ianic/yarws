@@ -11,11 +11,12 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Debug)]
-struct Msg {
-    is_binary: bool,
-    binary: Vec<u8>,
-    text: String,
+pub struct Msg {
+    pub is_binary: bool,
+    pub binary: Vec<u8>,
+    pub text: String,
 }
+
 impl Msg {
     fn as_raw(&self) -> Vec<u8> {
         if self.is_binary {
@@ -25,13 +26,12 @@ impl Msg {
     }
 }
 
-pub async fn handle(hu: http::Upgrade, log: slog::Logger) {
+pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sender<Msg>) {
     debug!(log, "open");
     let (soc_rx, mut soc_tx) = io::split(hu.stream);
     let (raw_tx, mut raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
     let (session_tx, session_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
     let (conn_tx, mut conn_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
-    let mut raw_tx2 = raw_tx.clone();
 
     // writes raw ws frames to the tcp socket
     // raw_rx -> soc_tx
@@ -51,8 +51,9 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) {
     //        -> session_tx   - for data frames
     let l = log.clone();
     let deflate_supported = hu.deflate_supported;
+    let raw_ws_tx = raw_tx.clone();
     spawn(async move {
-        if let Err(e) = read(soc_rx, raw_tx, session_tx, deflate_supported, &l).await {
+        if let Err(e) = read(soc_rx, raw_ws_tx, session_tx, deflate_supported, &l).await {
             error!(l, "{}", e);
         }
         debug!(l, "read half closed");
@@ -61,9 +62,10 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) {
     // transforms application Msg to raw
     // conn_rx -> raw_tx
     let l = log.clone();
+    let mut raw_session_tx = raw_tx.clone();
     spawn(async move {
         while let Some(m) = conn_rx.recv().await {
-            if let Err(e) = raw_tx2.send(m.as_raw()).await {
+            if let Err(e) = raw_session_tx.send(m.as_raw()).await {
                 error!(l, "{}", e);
                 break;
             }
@@ -73,27 +75,28 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) {
 
     // process application messages
     // session_rx -> conn_tx
-    let l = log.clone();
-    spawn(async move {
-        if let Err(e) = session(session_rx, conn_tx).await {
-            error!(l, "{}", e);
-        }
-        debug!(l, "session closed");
-    });
+    // let l = log.clone();
+    // spawn(async move {
+    //     if let Err(e) = session(session_rx, conn_tx).await {
+    //         error!(l, "{}", e);
+    //     }
+    //     debug!(l, "session closed");
+    // });
+    (session_rx, conn_tx)
 }
 
-// TODO: kako iz session signalizirati close
-async fn session(mut rx: Receiver<Msg>, mut tx: Sender<Msg>) -> Result<(), Box<dyn Error>> {
-    while let Some(m) = rx.recv().await {
-        // some serious processing
-        //m.text = m.text.chars().rev().collect::<String>();
-        // if m.text == "close" {
-        //     break;
-        // }
-        tx.send(m).await?;
-    }
-    Ok(())
-}
+// // TODO: kako iz session signalizirati close
+// async fn session(mut rx: Receiver<Msg>, mut tx: Sender<Msg>) -> Result<(), Box<dyn Error>> {
+//     while let Some(m) = rx.recv().await {
+//         // some serious processing
+//         //m.text = m.text.chars().rev().collect::<String>();
+//         // if m.text == "close" {
+//         //     break;
+//         // }
+//         tx.send(m).await?;
+//     }
+//     Ok(())
+// }
 
 async fn read_payload(soc_rx: &mut ReadHalf<TcpStream>, frame: &mut Frame) -> io::Result<()> {
     let l = frame.payload_len as usize;

@@ -1,6 +1,5 @@
 use crate::http;
 use inflate::inflate_bytes;
-use std::error::Error;
 use std::fmt;
 use std::str;
 use tokio;
@@ -21,8 +20,8 @@ pub enum Msg {
 impl Msg {
     fn as_raw(&self) -> Vec<u8> {
         match self {
-            Msg::Binary(b) => return binary_message(&b),
-            Msg::Text(t) => text_message(&t),
+            Msg::Binary(b) => return binary_frame(&b),
+            Msg::Text(t) => text_frame(&t),
             //Msg::Close => close_message(),
         }
     }
@@ -73,6 +72,38 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sen
     (session_rx, conn_tx)
 }
 
+#[derive(Fail, Debug)]
+enum WsError {
+    #[fail(display = "IO error: {}", error)]
+    IoError { error: io::Error },
+    #[fail(display = "fail to send message upstream: {}", error)]
+    UpstreamError { error: mpsc::error::SendError<Msg> },
+    #[fail(display = "fail to send frame: {}", error)]
+    ConnError { error: mpsc::error::SendError<Vec<u8>> },
+    #[fail(display = "wrong header: {}", _0)]
+    WrongHeader(String),
+    #[fail(display = "inflate failed: {}", _0)]
+    InflateFailed(String),
+    #[fail(display = "text payload not a valid utf-8 string: {}", _0)]
+    TextPayloadNotValidUTF8(std::str::Utf8Error),
+}
+
+impl From<io::Error> for WsError {
+    fn from(e: io::Error) -> Self {
+        WsError::IoError { error: e }
+    }
+}
+impl From<mpsc::error::SendError<Msg>> for WsError {
+    fn from(e: mpsc::error::SendError<Msg>) -> Self {
+        WsError::UpstreamError { error: e }
+    }
+}
+impl From<mpsc::error::SendError<Vec<u8>>> for WsError {
+    fn from(e: mpsc::error::SendError<Vec<u8>>) -> Self {
+        WsError::ConnError { error: e }
+    }
+}
+
 struct Conn {
     deflate_supported: bool,
     soc_rx: ReadHalf<TcpStream>,
@@ -100,7 +131,7 @@ impl Conn {
         }
     }
 
-    async fn read_payload(&mut self, frame: &mut Frame) -> io::Result<()> {
+    async fn read_payload(&mut self, frame: &mut Frame) -> Result<(), WsError> {
         let l = frame.payload_len as usize;
         if l > 0 {
             let mut buf = vec![0u8; l];
@@ -110,12 +141,12 @@ impl Conn {
         Ok(())
     }
 
-    async fn read_header(&mut self) -> io::Result<Option<Frame>> {
+    async fn read_header(&mut self) -> Result<Option<Frame>, WsError> {
         if let Err(e) = self.soc_rx.read_exact(&mut self.header_buf[0..2]).await {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 return Ok(None);
             }
-            return Err(e);
+            return Err(e.into());
         }
         let mut frame = Frame::new(self.header_buf[0], self.header_buf[1]);
 
@@ -127,7 +158,7 @@ impl Conn {
         Ok(Some(frame))
     }
 
-    async fn read(&mut self) -> Result<(), Box<dyn Error>> {
+    async fn read(&mut self) -> Result<(), WsError> {
         let mut fragment: Option<Frame> = None;
         loop {
             let mut frame = match self.read_header().await? {
@@ -157,13 +188,12 @@ impl Conn {
         Ok(())
     }
 
-    async fn handle_frame(&mut self, frame: Frame) -> Result<(), Box<dyn Error>> {
+    async fn handle_frame(&mut self, frame: Frame) -> Result<(), WsError> {
         match frame.opcode.value() {
             TEXT | BINARY => self.session_tx.send(frame2_msg(frame)).await?,
-            CLOSE => self.raw_tx.send(close_message()).await?,
+            CLOSE => self.raw_tx.send(close_frame()).await?,
             PING => self.raw_tx.send(frame.to_pong()).await?,
-            PONG => (),
-            _ => return Err(format!("reserved ws frame opcode {}", frame.opcode).into()),
+            PONG | _ => (),
         }
         Ok(())
     }
@@ -200,6 +230,9 @@ impl Opcode {
     }
     fn value(&self) -> u8 {
         self.0
+    }
+    fn valid(&self) -> bool {
+        self.data() || self.control() || self.continuation()
     }
     fn data(&self) -> bool {
         self.0 == TEXT || self.0 == BINARY
@@ -309,14 +342,6 @@ impl Frame {
         self.payload = payload;
     }
 
-    // fn is_data_frame(&self) -> bool {
-    //     self.opcode == TEXT || self.opcode == BINARY
-    // }
-
-    // fn is_control_frame(&self) -> bool {
-    //     self.opcode >= CLOSE && self.opcode <= PONG
-    // }
-
     fn is_rsv_ok(&self, deflate_supported: bool) -> bool {
         if deflate_supported {
             return self.rsv == 0 || self.rsv == 4;
@@ -325,44 +350,57 @@ impl Frame {
         self.rsv == 0
     }
 
-    fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), String> {
-        if self.opcode.control() && self.payload_len > 125 {
-            return Err(format!("too log control frame len: {}", self.payload_len).into());
+    fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), WsError> {
+        if !self.opcode.valid() {
+            return Err(WsError::WrongHeader(format!("reserved opcode {}", self.opcode.value())));
         }
-        if self.opcode.control() && !self.fin {
-            return Err(format!("fragmented control frame").into());
-        }
-        if !self.opcode.control() {
+        if self.opcode.control() {
+            // control frames must be short, payload <= 125 bytes
+            // can't be split into fragments
+            if self.payload_len > 125 {
+                return Err(WsError::WrongHeader(format!(
+                    "too long control frame {} > 125",
+                    self.payload_len
+                )));
+            }
+            if !self.fin {
+                return Err(WsError::WrongHeader("fragmented control frame".to_owned()));
+            }
+        } else {
+            // continuation (waiting for more fragmets) frames must be in order start/middle.../end
             if !in_continuation && self.opcode.continuation() {
-                return Err(format!("wrong continuation frame").into());
+                return Err(WsError::WrongHeader("not in continuation".to_owned()));
             }
             if in_continuation && !self.opcode.continuation() {
-                return Err(format!("wrong continuation frame").into());
+                return Err(WsError::WrongHeader("fin frame during continuation".to_owned()));
             }
         }
         if !self.is_rsv_ok(deflate_supported) {
-            return Err(format!("wrong rsv").into());
+            // only bit 1 of rsv is currently used
+            return Err(WsError::WrongHeader("wrong rsv".to_owned()));
         }
         Ok(())
     }
 
-    fn validate_payload(&mut self) -> Result<(), String> {
+    fn validate_payload(&mut self) -> Result<(), WsError> {
         self.inflate()?;
         if !self.opcode.text() {
             return Ok(());
         }
         match str::from_utf8(&self.payload) {
             Ok(s) => self.text_payload = s.to_owned(),
-            Err(e) => return Err(format!("payload is not valid utf-8 string error: {}", e)),
+            //Err(e) => return Err(format!("payload is not valid utf-8 string error: {}", e)),
+            Err(e) => return Err(WsError::TextPayloadNotValidUTF8(e)),
         }
         Ok(())
     }
 
-    fn inflate(&mut self) -> Result<(), String> {
+    fn inflate(&mut self) -> Result<(), WsError> {
         if self.rsv1 && self.payload_len > 0 {
             match inflate_bytes(&self.payload) {
                 Ok(p) => self.payload = p,
-                Err(e) => return Err(format!("failed to inflate payload error: {}", e)),
+                //Err(e) => return Err(format!("failed to inflate payload error: {}", e)),
+                Err(e) => return Err(WsError::InflateFailed(e)),
             }
         }
         Ok(())
@@ -409,7 +447,7 @@ impl Frame {
     }
 
     fn to_pong(&self) -> Vec<u8> {
-        create_message(PONG, &self.payload)
+        create_frame(PONG, &self.payload)
     }
 
     fn append(&mut self, other: &Frame) -> &Frame {
@@ -426,16 +464,16 @@ fn frame2_msg(frame: Frame) -> Msg {
     Msg::Text(frame.text_payload)
 }
 
-fn close_message() -> Vec<u8> {
+fn close_frame() -> Vec<u8> {
     vec![0b1000_1000u8, 0b0000_0000u8]
 }
 
-fn text_message(text: &str) -> Vec<u8> {
-    create_message(TEXT, text.as_bytes())
+fn text_frame(text: &str) -> Vec<u8> {
+    create_frame(TEXT, text.as_bytes())
 }
 
-fn binary_message(data: &[u8]) -> Vec<u8> {
-    create_message(BINARY, data)
+fn binary_frame(data: &[u8]) -> Vec<u8> {
+    create_frame(BINARY, data)
 }
 
 /*
@@ -458,7 +496,7 @@ fn binary_message(data: &[u8]) -> Vec<u8> {
 |                     Payload Data continued ...                |
 +---------------------------------------------------------------+
 */
-fn create_message(opcode: u8, body: &[u8]) -> Vec<u8> {
+fn create_frame(opcode: u8, body: &[u8]) -> Vec<u8> {
     let mut buf = vec![0b1000_0000u8 + opcode];
 
     // add peyload length
@@ -486,14 +524,17 @@ mod tests {
     use miniz_oxide::inflate::decompress_to_vec;
     #[test]
     fn test_text_message() {
-        let buf = text_message("abc");
+        let buf = text_frame("abc");
         assert_eq!(5, buf.len());
         assert_eq!([0x81, 0x03, 0x61, 0x62, 0x63], buf[0..]);
 
-        let buf = text_message("The length of the Payload data, in bytes: if 0-125, that is the payload length.  If 126, the following 2 bytes interpreted as a 16-bit unsigned integer are the payload length.");
-        assert_eq!(179, buf.len());
-        assert_eq!([0x81, 0x7e, 0x00, 0xaf], buf[0..4]);
-        assert_eq!(0xaf, buf[3]); // 175 is body length
+        let buf = text_frame(
+            "The length of the Payload data, in bytes: if 0-125, that is the payload length.  
+        If 126, the following 2 bytes interpreted as a 16-bit unsigned integer are the payload length.",
+        );
+        assert_eq!(188, buf.len());
+        assert_eq!([0x81, 0x7e, 0x00, 184], buf[0..4]);
+        assert_eq!(184, buf[3]); // 175 is body length
 
         //println!("{:02x?}", buf);
     }
@@ -509,10 +550,10 @@ mod tests {
         let mut f = Frame::new(0, 0);
         f.rsv1 = true;
         f.rsv = 4;
+        f.opcode = Opcode::new(1);
         f.payload_len = 7;
         f.payload = vec![0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00];
-        //f.payload = vec![0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00, 0x00, 0xff, 0xff];
-        assert_eq!(true, f.inflate().is_ok());
+        assert_eq!(true, f.validate_payload().is_ok());
         assert_eq!("Hello", f.text_payload);
     }
 }

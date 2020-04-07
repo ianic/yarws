@@ -11,6 +11,8 @@ use slog::Drain;
 use slog::Logger;
 use std::error::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
+#[macro_use]
+extern crate failure;
 
 mod http;
 mod ws;

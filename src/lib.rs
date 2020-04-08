@@ -20,8 +20,8 @@ pub mod ws;
 
 pub struct Session {
     pub no: usize,
-    pub tx: Sender<ws::Msg>,
-    pub rx: Receiver<ws::Msg>,
+    pub tx: Sender<Msg>,
+    pub rx: Receiver<Msg>,
 }
 
 pub struct Server {
@@ -71,6 +71,45 @@ async fn handle_socket(sock: TcpStream, no: usize, mut sessions_tx: Sender<Sessi
             }
         }
         Err(e) => error!(log, "upgrade error: {}", e),
+    }
+}
+
+#[derive(Debug)]
+pub enum Msg {
+    Binary(Vec<u8>),
+    Text(String),
+    //Close,
+}
+
+#[derive(Fail, Debug)]
+pub enum Error {
+    #[fail(display = "IO error: {}", error)]
+    IoError { error: io::Error },
+    #[fail(display = "fail to send message upstream: {}", error)]
+    UpstreamError { error: mpsc::error::SendError<Msg> },
+    #[fail(display = "fail to send frame: {}", error)]
+    ConnError { error: mpsc::error::SendError<Vec<u8>> },
+    #[fail(display = "wrong header: {}", _0)]
+    WrongHeader(String),
+    #[fail(display = "inflate failed: {}", _0)]
+    InflateFailed(String),
+    #[fail(display = "text payload not a valid utf-8 string: {}", _0)]
+    TextPayloadNotValidUTF8(std::str::Utf8Error),
+}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Error::IoError { error: e }
+    }
+}
+impl From<mpsc::error::SendError<Msg>> for Error {
+    fn from(e: mpsc::error::SendError<Msg>) -> Self {
+        Error::UpstreamError { error: e }
+    }
+}
+impl From<mpsc::error::SendError<Vec<u8>>> for Error {
+    fn from(e: mpsc::error::SendError<Vec<u8>>) -> Self {
+        Error::ConnError { error: e }
     }
 }
 

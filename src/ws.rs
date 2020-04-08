@@ -1,3 +1,4 @@
+use super::{Error, Msg};
 use crate::http;
 use inflate::inflate_bytes;
 use std::fmt;
@@ -9,23 +10,6 @@ use tokio::prelude::*;
 use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
-
-#[derive(Debug)]
-pub enum Msg {
-    Binary(Vec<u8>),
-    Text(String),
-    //Close,
-}
-
-impl Msg {
-    fn as_raw(&self) -> Vec<u8> {
-        match self {
-            Msg::Binary(b) => return binary_frame(&b),
-            Msg::Text(t) => text_frame(&t),
-            //Msg::Close => close_message(),
-        }
-    }
-}
 
 pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sender<Msg>) {
     trace!(log, "open");
@@ -72,35 +56,13 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sen
     (session_rx, conn_tx)
 }
 
-#[derive(Fail, Debug)]
-enum WsError {
-    #[fail(display = "IO error: {}", error)]
-    IoError { error: io::Error },
-    #[fail(display = "fail to send message upstream: {}", error)]
-    UpstreamError { error: mpsc::error::SendError<Msg> },
-    #[fail(display = "fail to send frame: {}", error)]
-    ConnError { error: mpsc::error::SendError<Vec<u8>> },
-    #[fail(display = "wrong header: {}", _0)]
-    WrongHeader(String),
-    #[fail(display = "inflate failed: {}", _0)]
-    InflateFailed(String),
-    #[fail(display = "text payload not a valid utf-8 string: {}", _0)]
-    TextPayloadNotValidUTF8(std::str::Utf8Error),
-}
-
-impl From<io::Error> for WsError {
-    fn from(e: io::Error) -> Self {
-        WsError::IoError { error: e }
-    }
-}
-impl From<mpsc::error::SendError<Msg>> for WsError {
-    fn from(e: mpsc::error::SendError<Msg>) -> Self {
-        WsError::UpstreamError { error: e }
-    }
-}
-impl From<mpsc::error::SendError<Vec<u8>>> for WsError {
-    fn from(e: mpsc::error::SendError<Vec<u8>>) -> Self {
-        WsError::ConnError { error: e }
+impl Msg {
+    fn as_raw(&self) -> Vec<u8> {
+        match self {
+            Msg::Binary(b) => binary_frame(&b),
+            Msg::Text(t) => text_frame(&t),
+            //Msg::Close => close_message(),
+        }
     }
 }
 
@@ -131,7 +93,7 @@ impl Conn {
         }
     }
 
-    async fn read_payload(&mut self, frame: &mut Frame) -> Result<(), WsError> {
+    async fn read_payload(&mut self, frame: &mut Frame) -> Result<(), Error> {
         let l = frame.payload_len as usize;
         if l > 0 {
             let mut buf = vec![0u8; l];
@@ -141,7 +103,7 @@ impl Conn {
         Ok(())
     }
 
-    async fn read_header(&mut self) -> Result<Option<Frame>, WsError> {
+    async fn read_header(&mut self) -> Result<Option<Frame>, Error> {
         if let Err(e) = self.soc_rx.read_exact(&mut self.header_buf[0..2]).await {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 return Ok(None);
@@ -158,7 +120,7 @@ impl Conn {
         Ok(Some(frame))
     }
 
-    async fn read(&mut self) -> Result<(), WsError> {
+    async fn read(&mut self) -> Result<(), Error> {
         let mut fragment: Option<Frame> = None;
         loop {
             let mut frame = match self.read_header().await? {
@@ -188,7 +150,7 @@ impl Conn {
         Ok(())
     }
 
-    async fn handle_frame(&mut self, frame: Frame) -> Result<(), WsError> {
+    async fn handle_frame(&mut self, frame: Frame) -> Result<(), Error> {
         match frame.opcode.value() {
             TEXT | BINARY => self.session_tx.send(frame2_msg(frame)).await?,
             CLOSE => self.raw_tx.send(close_frame()).await?,
@@ -350,39 +312,39 @@ impl Frame {
         self.rsv == 0
     }
 
-    fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), WsError> {
+    fn validate(&self, deflate_supported: bool, in_continuation: bool) -> Result<(), Error> {
         if !self.opcode.valid() {
-            return Err(WsError::WrongHeader(format!("reserved opcode {}", self.opcode.value())));
+            return Err(Error::WrongHeader(format!("reserved opcode {}", self.opcode.value())));
         }
         if self.opcode.control() {
             // control frames must be short, payload <= 125 bytes
             // can't be split into fragments
             if self.payload_len > 125 {
-                return Err(WsError::WrongHeader(format!(
+                return Err(Error::WrongHeader(format!(
                     "too long control frame {} > 125",
                     self.payload_len
                 )));
             }
             if !self.fin {
-                return Err(WsError::WrongHeader("fragmented control frame".to_owned()));
+                return Err(Error::WrongHeader("fragmented control frame".to_owned()));
             }
         } else {
             // continuation (waiting for more fragmets) frames must be in order start/middle.../end
             if !in_continuation && self.opcode.continuation() {
-                return Err(WsError::WrongHeader("not in continuation".to_owned()));
+                return Err(Error::WrongHeader("not in continuation".to_owned()));
             }
             if in_continuation && !self.opcode.continuation() {
-                return Err(WsError::WrongHeader("fin frame during continuation".to_owned()));
+                return Err(Error::WrongHeader("fin frame during continuation".to_owned()));
             }
         }
         if !self.is_rsv_ok(deflate_supported) {
             // only bit 1 of rsv is currently used
-            return Err(WsError::WrongHeader("wrong rsv".to_owned()));
+            return Err(Error::WrongHeader("wrong rsv".to_owned()));
         }
         Ok(())
     }
 
-    fn validate_payload(&mut self) -> Result<(), WsError> {
+    fn validate_payload(&mut self) -> Result<(), Error> {
         self.inflate()?;
         if !self.opcode.text() {
             return Ok(());
@@ -390,17 +352,17 @@ impl Frame {
         match str::from_utf8(&self.payload) {
             Ok(s) => self.text_payload = s.to_owned(),
             //Err(e) => return Err(format!("payload is not valid utf-8 string error: {}", e)),
-            Err(e) => return Err(WsError::TextPayloadNotValidUTF8(e)),
+            Err(e) => return Err(Error::TextPayloadNotValidUTF8(e)),
         }
         Ok(())
     }
 
-    fn inflate(&mut self) -> Result<(), WsError> {
+    fn inflate(&mut self) -> Result<(), Error> {
         if self.rsv1 && self.payload_len > 0 {
             match inflate_bytes(&self.payload) {
                 Ok(p) => self.payload = p,
                 //Err(e) => return Err(format!("failed to inflate payload error: {}", e)),
-                Err(e) => return Err(WsError::InflateFailed(e)),
+                Err(e) => return Err(Error::InflateFailed(e)),
             }
         }
         Ok(())

@@ -1,7 +1,6 @@
 // server.rs
 use slog::Drain;
 use slog::Logger;
-use std::error::Error;
 use structopt::StructOpt;
 use tokio;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -20,6 +19,9 @@ struct Args {
 
     #[structopt(short = "i", long = "bind-ip", default_value = "127.0.0.1")]
     ip: String,
+
+    #[structopt(short = "r", long = "reverse", help = "Reverse every text message")]
+    reverse: bool,
 }
 
 impl Args {
@@ -56,7 +58,14 @@ async fn main() {
         Ok(srv) => {
             let mut sessions = srv.sessions().await;
             while let Some(session) = sessions.recv().await {
-                echo(session.rx, session.tx, log.clone()).await.unwrap();
+                let res = if args.reverse {
+                    reverse_echo(session.rx, session.tx).await
+                } else {
+                    echo(session.rx, session.tx).await
+                };
+                if let Err(e) = res {
+                    error!(log, "session error: {}", e);
+                }
             }
         }
         Err(e) => {
@@ -65,14 +74,23 @@ async fn main() {
     }
 }
 
-async fn echo(
-    mut rx: Receiver<yarws::ws::Msg>,
-    mut tx: Sender<yarws::ws::Msg>,
-    log: slog::Logger,
-) -> Result<(), Box<dyn Error>> {
+async fn echo(mut rx: Receiver<yarws::Msg>, mut tx: Sender<yarws::Msg>) -> Result<(), yarws::Error> {
     while let Some(m) = rx.recv().await {
         tx.send(m).await?;
     }
-    trace!(log, "session closed");
+    Ok(())
+}
+
+async fn reverse_echo(mut rx: Receiver<yarws::Msg>, mut tx: Sender<yarws::Msg>) -> Result<(), yarws::Error> {
+    while let Some(m) = rx.recv().await {
+        let m = match m {
+            yarws::Msg::Text(t) => {
+                let t = t.chars().rev().collect::<String>();
+                yarws::Msg::Text(t)
+            }
+            _ => m,
+        };
+        tx.send(m).await?;
+    }
     Ok(())
 }

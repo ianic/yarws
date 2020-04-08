@@ -1,7 +1,8 @@
 [package]
-name = "server"
+name = "yarws"
+description = "Yet another Rust websocket library"
 version = "0.1.0"
-authors = ["Igor Anic <ianic@inet.hr>"]
+authors = ["Igor Anic <igor.anic@gmail.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -18,3 +19,4 @@ slog = { version = "2.5.2", features = ["max_level_trace", "release_max_level_wa
 slog-term = "2.5.0"
 slog-async = "2.5.0"
 failure = "0.1.7"
+structopt = "0.3.12"

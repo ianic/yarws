@@ -65,6 +65,8 @@ async fn main() {
                 };
                 if let Err(e) = res {
                     error!(log, "session error: {}", e);
+                } else {
+                    trace!(log, "session closed"; "conn" => session.no);
                 }
             }
         }

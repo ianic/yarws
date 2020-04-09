@@ -15,7 +15,7 @@ extern crate slog_term;
 #[macro_use]
 extern crate failure;
 
-mod http;
+pub mod http;
 pub mod ws;
 
 pub struct Session {

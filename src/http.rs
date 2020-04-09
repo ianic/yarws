@@ -93,12 +93,15 @@ impl Header {
         s.push_str(&"\r\n");
         if self.is_deflate_supported() {
             s.push_str(
-                "Sec-Websocket-Extensions: permessage-deflate;client_no_context_takeover;server_no_context_takeover",
+                "Sec-WebSocket-Extensions: permessage-deflate;client_no_context_takeover;server_no_context_takeover",
             );
             s.push_str(&"\r\n");
         }
         s.push_str(&"\r\n");
         s
+    }
+    fn is_ws_connect(&self) -> bool {
+        self.connection == "Upgrade" && (self.upgrade == "websocket" || self.upgrade == "WebSocket")
     }
 }
 
@@ -117,6 +120,43 @@ fn parse_http_header(line: &str) -> Option<(&str, &str)> {
     let first = splitter.next()?;
     let second = splitter.next()?;
     Some((first, second.trim()))
+}
+
+pub async fn connect(mut stream: TcpStream) -> io::Result<Upgrade> {
+    stream.write_all(connect_header().as_bytes()).await?;
+
+    let mut rdr = io::BufReader::new(&mut stream);
+    let mut header = Header::new();
+    loop {
+        let mut line = String::new();
+        match rdr.read_line(&mut line).await? {
+            0 => break, // eof
+            2 => break, // empty line \r\n = end of header line
+            _n => header.parse(&line),
+        }
+    }
+
+    if header.is_ws_connect() {
+        return Ok(Upgrade {
+            stream: stream,
+            deflate_supported: header.is_deflate_supported(),
+        });
+    }
+    Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ws header"))
+}
+
+fn connect_header() -> String {
+    let header = "GET / HTTP/1.1\r\n\
+Connection: Upgrade\r\n\
+Pragma: no-cache\r\n\
+Host: localhost:9001\r\n\
+Cache-Control: no-cache\r\n\
+Upgrade: websocket\r\n\
+Origin: http://localhost:9001\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: HNDy4+PhhRtPmNt1Xet/Ew==\r\n\
+Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n";
+    header.to_owned()
 }
 
 #[cfg(test)]

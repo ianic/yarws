@@ -1,4 +1,5 @@
 use slog::Logger;
+use std::str;
 use tokio;
 use tokio::io;
 use tokio::net::TcpListener;
@@ -15,6 +16,10 @@ extern crate slog_term;
 #[macro_use]
 extern crate failure;
 
+#[cfg(test)]
+#[macro_use]
+extern crate hex_literal;
+
 pub mod http;
 pub mod ws;
 
@@ -22,6 +27,25 @@ pub struct Session {
     pub no: usize,
     pub tx: Sender<Msg>,
     pub rx: Receiver<Msg>,
+}
+
+impl Session {
+    pub async fn send(&mut self, text: &str) -> Result<(), Error> {
+        self.tx.send(Msg::Text(text.to_owned())).await?;
+        Ok(())
+    }
+    pub async fn receive(&mut self) -> Result<Option<String>, Error> {
+        match self.rx.recv().await {
+            None => Ok(None),
+            Some(m) => match m {
+                Msg::Text(t) => Ok(Some(t)),
+                Msg::Binary(buf) => match str::from_utf8(&buf) {
+                    Ok(s) => Ok(Some(s.to_owned())),
+                    Err(e) => return Err(Error::TextPayloadNotValidUTF8(e)),
+                },
+            },
+        }
+    }
 }
 
 pub struct Server {
@@ -113,6 +137,15 @@ impl From<mpsc::error::SendError<Vec<u8>>> for Error {
     }
 }
 
-#[cfg(test)]
-#[macro_use]
-extern crate hex_literal;
+pub async fn connect(addr: String, log: Logger) -> Result<Session, Error> {
+    let stream = TcpStream::connect(addr).await?;
+    let upgrade = http::connect(stream).await?;
+    let (rx, tx) = ws::handle(upgrade, log.clone()).await;
+    Ok(Session { no: 1, rx: rx, tx: tx })
+}
+
+/*
+TODOs
+- clean exit
+- how to use logger into library
+*/

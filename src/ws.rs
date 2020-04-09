@@ -140,7 +140,7 @@ impl Conn {
             }
             frame.validate_payload()?;
 
-            trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len);
+            trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "len" => frame.payload_len);
             let is_close = frame.is_close();
             self.handle_frame(frame).await?;
             if is_close {
@@ -351,7 +351,6 @@ impl Frame {
         }
         match str::from_utf8(&self.payload) {
             Ok(s) => self.text_payload = s.to_owned(),
-            //Err(e) => return Err(format!("payload is not valid utf-8 string error: {}", e)),
             Err(e) => return Err(Error::TextPayloadNotValidUTF8(e)),
         }
         Ok(())
@@ -361,7 +360,6 @@ impl Frame {
         if self.rsv1 && self.payload_len > 0 {
             match inflate_bytes(&self.payload) {
                 Ok(p) => self.payload = p,
-                //Err(e) => return Err(format!("failed to inflate payload error: {}", e)),
                 Err(e) => return Err(Error::InflateFailed(e)),
             }
         }

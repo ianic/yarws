@@ -1,16 +1,9 @@
-// server.rs
 use structopt::StructOpt;
 use tokio;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[macro_use]
-extern crate failure;
-#[macro_use]
 extern crate slog;
-extern crate slog_async;
-extern crate slog_term;
-
-mod log;
 
 #[derive(StructOpt, Debug)]
 struct Args {
@@ -33,7 +26,7 @@ impl Args {
 #[tokio::main]
 async fn main() {
     let args = Args::from_args();
-    let log = log::config();
+    let log = yarws::log::config();
 
     match yarws::Server::bind(args.addr(), log.clone()).await {
         Ok(srv) => {

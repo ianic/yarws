@@ -5,7 +5,7 @@ pub fn config() -> Logger {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
-    //let log Logger::root(drain, o!());
+    // let log Logger::root(drain, o!()); // simple variant without file:line module
     Logger::root(
         drain,
         o!("file" =>

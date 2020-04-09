@@ -11,8 +11,6 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 #[macro_use]
 extern crate slog;
-extern crate slog_async;
-extern crate slog_term;
 #[macro_use]
 extern crate failure;
 
@@ -20,8 +18,9 @@ extern crate failure;
 #[macro_use]
 extern crate hex_literal;
 
-pub mod http;
-pub mod ws;
+mod http;
+pub mod log;
+mod ws;
 
 pub struct Session {
     pub no: usize,

@@ -148,4 +148,6 @@ pub async fn connect(addr: String, log: Logger) -> Result<Session, Error> {
 TODOs
 - clean exit
 - how to use logger into library
+- client messages should be masked
+- znamo samo primati komprimirane poruke, ne i komprimirati
 */

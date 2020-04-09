@@ -1,34 +1,27 @@
 use super::{Error, Msg};
 use crate::http;
 use inflate::inflate_bytes;
+use rand::Rng;
+use slog::Logger;
 use std::fmt;
 use std::str;
 use tokio;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sender<Msg>) {
+pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
     trace!(log, "open");
-    let (soc_rx, mut soc_tx) = io::split(hu.stream);
-    let (raw_tx, mut raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+    let (soc_rx, soc_tx) = io::split(hu.stream);
+    let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
     let (session_tx, session_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
-    let (conn_tx, mut conn_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+    let (conn_tx, conn_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
 
-    // writes raw ws frames to the tcp socket
-    // raw_rx -> soc_tx
-    let l = log.clone();
-    spawn(async move {
-        while let Some(v) = raw_rx.recv().await {
-            if let Err(e) = soc_tx.write(&v).await {
-                error!(l, "{}", e);
-                break;
-            }
-        }
-    });
+    // writes raw ws frames to the tcp socket; raw_rx -> soc_tx
+    raw_frame2socket(raw_rx, soc_tx, log.clone());
 
     // reads tcp socket, parse incoming stream as ws frames and then into application messages
     // soc_rx -> raw_tx       - for control frames
@@ -40,28 +33,40 @@ pub async fn handle(hu: http::Upgrade, log: slog::Logger) -> (Receiver<Msg>, Sen
         }
     });
 
-    // transforms application Msg to raw
-    // conn_rx -> raw_tx
-    let l = log.clone();
-    let mut raw_session_tx = raw_tx.clone();
-    spawn(async move {
-        while let Some(m) = conn_rx.recv().await {
-            if let Err(e) = raw_session_tx.send(m.as_raw()).await {
-                error!(l, "{}", e);
-                break;
-            }
-        }
-    });
+    // transforms application Msg to raw; conn_rx -> raw_tx
+    msg2raw_frame(conn_rx, raw_tx, hu.client, log.clone());
 
     (session_rx, conn_tx)
 }
 
+fn raw_frame2socket(mut raw_rx: Receiver<Vec<u8>>, mut soc_tx: WriteHalf<TcpStream>, log: Logger) {
+    spawn(async move {
+        while let Some(v) = raw_rx.recv().await {
+            if let Err(e) = soc_tx.write(&v).await {
+                error!(log, "{}", e);
+                break;
+            }
+        }
+    });
+}
+
+fn msg2raw_frame(mut conn_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, client: bool, log: Logger) {
+    spawn(async move {
+        while let Some(m) = conn_rx.recv().await {
+            if let Err(e) = raw_tx.send(m.as_raw(client)).await {
+                error!(log, "{}", e);
+                break;
+            }
+        }
+    });
+}
+
 impl Msg {
-    fn as_raw(&self) -> Vec<u8> {
+    fn as_raw(&self, client: bool) -> Vec<u8> {
+        let w = FrameWriter::new(client);
         match self {
-            Msg::Binary(b) => binary_frame(&b),
-            Msg::Text(t) => text_frame(&t),
-            //Msg::Close => close_message(),
+            Msg::Binary(b) => w.binary(b.to_vec()),
+            Msg::Text(t) => w.text(t.to_string()),
         }
     }
 }
@@ -152,8 +157,8 @@ impl Conn {
 
     async fn handle_frame(&mut self, frame: Frame) -> Result<(), Error> {
         match frame.opcode.value() {
-            TEXT | BINARY => self.session_tx.send(frame2_msg(frame)).await?,
-            CLOSE => self.raw_tx.send(close_frame()).await?,
+            TEXT | BINARY => self.session_tx.send(frame.to_msg()).await?,
+            CLOSE => self.raw_tx.send(FrameWriter::close()).await?,
             PING => self.raw_tx.send(frame.to_pong()).await?,
             PONG | _ => (),
         }
@@ -294,12 +299,7 @@ impl Frame {
 
     fn set_payload(&mut self, mut payload: Vec<u8>) {
         if self.mask {
-            // unmask payload
-            // loop through the octets of ENCODED and XOR the octet with the (i modulo 4)th octet of MASK
-            // ref: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers
-            for (i, b) in payload.iter_mut().enumerate() {
-                *b = *b ^ self.masking_key[i % 4];
-            }
+            payload = mask(payload, self.masking_key);
         }
         self.payload = payload;
     }
@@ -406,8 +406,8 @@ impl Frame {
         self.opcode.close()
     }
 
-    fn to_pong(&self) -> Vec<u8> {
-        create_frame(PONG, &self.payload)
+    fn to_pong(self) -> Vec<u8> {
+        FrameWriter::control(PONG, self.payload)
     }
 
     fn append(&mut self, other: &Frame) -> &Frame {
@@ -415,66 +415,104 @@ impl Frame {
         self.payload.extend_from_slice(&other.payload);
         self
     }
-}
 
-fn frame2_msg(frame: Frame) -> Msg {
-    if frame.opcode.binary() {
-        return Msg::Binary(frame.payload);
+    fn to_msg(self) -> Msg {
+        if self.opcode.binary() {
+            return Msg::Binary(self.payload);
+        }
+        Msg::Text(self.text_payload)
     }
-    Msg::Text(frame.text_payload)
 }
 
-fn close_frame() -> Vec<u8> {
-    vec![0b1000_1000u8, 0b0000_0000u8]
+//Converts masked data into unmasked data, or vice versa.
+//The same algorithm applies regardless of the direction of the translation,
+//e.g., the same steps are applied to ask the data as to unmask the data.
+fn mask(mut payload: Vec<u8>, key: [u8; 4]) -> Vec<u8> {
+    // loop through the octets of ENCODED and XOR the octet with the (i modulo 4)th octet of MASK
+    // ref: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b = *b ^ key[i % 4];
+    }
+    payload
 }
 
-fn text_frame(text: &str) -> Vec<u8> {
-    create_frame(TEXT, text.as_bytes())
+struct FrameWriter {
+    mask: bool,
 }
 
-fn binary_frame(data: &[u8]) -> Vec<u8> {
-    create_frame(BINARY, data)
-}
-
-/*
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-------+-+-------------+-------------------------------+
-|F|R|R|R| opcode|M| Payload len |    Extended payload length    |
-|I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
-|N|V|V|V|       |S|             |   (if payload len==126/127)   |
-| |1|2|3|       |K|             |                               |
-+-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
-|     Extended payload length continued, if payload len == 127  |
-+ - - - - - - - - - - - - - - - +-------------------------------+
-|                               |Masking-key, if MASK set to 1  |
-+-------------------------------+-------------------------------+
-| Masking-key (continued)       |          Payload Data         |
-+-------------------------------- - - - - - - - - - - - - - - - +
-:                     Payload Data continued ...                :
-+ - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
-|                     Payload Data continued ...                |
-+---------------------------------------------------------------+
-*/
-fn create_frame(opcode: u8, body: &[u8]) -> Vec<u8> {
-    let mut buf = vec![0b1000_0000u8 + opcode];
-
-    // add peyload length
-    let l = body.len();
-    if l < 126 {
-        buf.push(l as u8);
-    } else if body.len() < 65536 {
-        buf.push(126u8);
-        let l = l as u16;
-        buf.extend_from_slice(&l.to_be_bytes());
-    } else {
-        buf.push(127u8);
-        let l = l as u64;
-        buf.extend_from_slice(&l.to_be_bytes());
+impl FrameWriter {
+    fn new(mask: bool) -> Self {
+        Self { mask: mask }
     }
 
-    buf.extend_from_slice(body);
-    buf
+    #[allow(dead_code)]
+    fn unmasked() -> Self {
+        Self { mask: false }
+    }
+
+    fn close() -> Vec<u8> {
+        vec![0b1000_1000u8, 0b0000_0000u8]
+    }
+
+    // control frames are not masked
+    fn control(opcode: u8, payload: Vec<u8>) -> Vec<u8> {
+        let fw = Self::new(false);
+        fw.build(opcode, payload)
+    }
+
+    fn binary(&self, payload: Vec<u8>) -> Vec<u8> {
+        self.build(BINARY, payload)
+    }
+
+    fn text(&self, payload: String) -> Vec<u8> {
+        self.build(TEXT, payload.into_bytes())
+    }
+
+    /*
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-------+-+-------------+-------------------------------+
+    |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+    |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+    |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+    | |1|2|3|       |K|             |                               |
+    +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+    |     Extended payload length continued, if payload len == 127  |
+    + - - - - - - - - - - - - - - - +-------------------------------+
+    |                               |Masking-key, if MASK set to 1  |
+    +-------------------------------+-------------------------------+
+    | Masking-key (continued)       |          Payload Data         |
+    +-------------------------------- - - - - - - - - - - - - - - - +
+    :                     Payload Data continued ...                :
+    + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+    |                     Payload Data continued ...                |
+    +---------------------------------------------------------------+
+    */
+    fn build(&self, opcode: u8, mut payload: Vec<u8>) -> Vec<u8> {
+        let mut buf = vec![0b1000_0000u8 + opcode];
+
+        // add peyload length
+        let l = payload.len();
+        if l < 126 {
+            buf.push(l as u8);
+        } else if payload.len() < 65536 {
+            buf.push(126u8);
+            let l = l as u16;
+            buf.extend_from_slice(&l.to_be_bytes());
+        } else {
+            buf.push(127u8);
+            let l = l as u64;
+            buf.extend_from_slice(&l.to_be_bytes());
+        }
+        if self.mask {
+            buf[1] = buf[1] | 0b1000_0000u8; // set masking bit
+            let masking_key = rand::thread_rng().gen::<[u8; 4]>(); // create key
+            buf.extend_from_slice(&masking_key); // write key to msg
+            payload = mask(payload, masking_key) // mask payload
+        }
+        buf.extend_from_slice(payload.as_slice());
+        buf
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +520,11 @@ mod tests {
     use super::*;
     use miniz_oxide::deflate::compress_to_vec;
     use miniz_oxide::inflate::decompress_to_vec;
+
+    fn text_frame(text: &str) -> Vec<u8> {
+        FrameWriter::unmasked().text(text.to_owned())
+    }
+
     #[test]
     fn test_text_message() {
         let buf = text_frame("abc");

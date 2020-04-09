@@ -24,6 +24,7 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<Upgrade> {
         return Ok(Upgrade {
             stream: stream,
             deflate_supported: header.is_deflate_supported(),
+            client: false,
         });
     }
     const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
@@ -35,6 +36,7 @@ pub async fn upgrade(mut stream: TcpStream) -> io::Result<Upgrade> {
 pub struct Upgrade {
     pub stream: TcpStream,
     pub deflate_supported: bool,
+    pub client: bool,
 }
 
 #[derive(Debug)]
@@ -148,6 +150,7 @@ pub async fn connect(mut stream: TcpStream, url: &str) -> io::Result<Upgrade> {
         return Ok(Upgrade {
             stream: stream,
             deflate_supported: header.is_deflate_supported(),
+            client: true,
         });
     }
     Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ws header"))

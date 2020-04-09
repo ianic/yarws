@@ -138,8 +138,8 @@ impl From<mpsc::error::SendError<Vec<u8>>> for Error {
 }
 
 pub async fn connect(addr: String, log: Logger) -> Result<Session, Error> {
-    let stream = TcpStream::connect(addr).await?;
-    let upgrade = http::connect(stream).await?;
+    let stream = TcpStream::connect(&addr).await?;
+    let upgrade = http::connect(stream, &addr).await?;
     let (rx, tx) = ws::handle(upgrade, log.clone()).await;
     Ok(Session { no: 1, rx: rx, tx: tx })
 }

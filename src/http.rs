@@ -1,4 +1,5 @@
 use base64;
+use rand::Rng;
 use sha1::{Digest, Sha1};
 use std::str;
 use tokio;
@@ -43,6 +44,7 @@ struct Header {
     version: String,
     key: String,
     extensions: String,
+    accept: String,
 }
 
 impl Header {
@@ -53,6 +55,7 @@ impl Header {
             version: String::new(),
             key: String::new(),
             extensions: String::new(),
+            accept: String::new(),
         }
     }
     fn parse(&mut self, line: &str) {
@@ -63,6 +66,7 @@ impl Header {
                 "Sec-WebSocket-Version" => self.version = value.to_string(),
                 "Sec-WebSocket-Key" => self.key = value.to_string(),
                 "Sec-WebSocket-Extensions" => self.add_extensions(value),
+                "Sec-WebSocket-Accept" => self.accept = value.to_string(),
                 //"Host"
                 //"Origin"
                 //_ => println!("other header: '{}' => '{}'", key, value),
@@ -100,8 +104,11 @@ impl Header {
         s.push_str(&"\r\n");
         s
     }
-    fn is_ws_connect(&self) -> bool {
-        self.connection == "Upgrade" && (self.upgrade == "websocket" || self.upgrade == "WebSocket")
+    fn is_ws_connect(&self, key: &str) -> bool {
+        let accept = ws_accept(key);
+        self.connection == "Upgrade"
+            && (self.upgrade == "websocket" || self.upgrade == "WebSocket")
+            && self.accept == accept
     }
 }
 
@@ -122,8 +129,9 @@ fn parse_http_header(line: &str) -> Option<(&str, &str)> {
     Some((first, second.trim()))
 }
 
-pub async fn connect(mut stream: TcpStream) -> io::Result<Upgrade> {
-    stream.write_all(connect_header().as_bytes()).await?;
+pub async fn connect(mut stream: TcpStream, url: &str) -> io::Result<Upgrade> {
+    let key = connect_key();
+    stream.write_all(connect_header(url, &key).as_bytes()).await?;
 
     let mut rdr = io::BufReader::new(&mut stream);
     let mut header = Header::new();
@@ -136,7 +144,7 @@ pub async fn connect(mut stream: TcpStream) -> io::Result<Upgrade> {
         }
     }
 
-    if header.is_ws_connect() {
+    if header.is_ws_connect(&key) {
         return Ok(Upgrade {
             stream: stream,
             deflate_supported: header.is_deflate_supported(),
@@ -145,18 +153,25 @@ pub async fn connect(mut stream: TcpStream) -> io::Result<Upgrade> {
     Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ws header"))
 }
 
-fn connect_header() -> String {
-    let header = "GET / HTTP/1.1\r\n\
+fn connect_header(url: &str, key: &str) -> String {
+    let mut h = "GET / HTTP/1.1\r\n\
 Connection: Upgrade\r\n\
-Pragma: no-cache\r\n\
-Host: localhost:9001\r\n\
-Cache-Control: no-cache\r\n\
 Upgrade: websocket\r\n\
-Origin: http://localhost:9001\r\n\
 Sec-WebSocket-Version: 13\r\n\
-Sec-WebSocket-Key: HNDy4+PhhRtPmNt1Xet/Ew==\r\n\
-Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n";
-    header.to_owned()
+Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\
+Sec-WebSocket-Key: "
+        .to_owned();
+    h.push_str(key);
+    h.push_str("\r\n");
+    h.push_str("Host: ");
+    h.push_str(url);
+    h.push_str("\r\n\r\n");
+    h
+}
+
+fn connect_key() -> String {
+    let buf = rand::thread_rng().gen::<[u8; 16]>();
+    base64::encode(&buf)
 }
 
 #[cfg(test)]
@@ -185,5 +200,12 @@ mod tests {
         */
         let acc = ws_accept("dGhlIHNhbXBsZSBub25jZQ==");
         assert_eq!(acc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn ws_key() {
+        let k = connect_key();
+        println!("key {}", k);
+        println!("{}", connect_header(&k, "minus5.hr"));
     }
 }

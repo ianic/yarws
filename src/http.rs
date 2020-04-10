@@ -1,3 +1,4 @@
+use super::Error;
 use base64;
 use rand::Rng;
 use sha1::{Digest, Sha1};
@@ -7,29 +8,19 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
-pub async fn upgrade(mut stream: TcpStream) -> io::Result<Upgrade> {
-    let mut rdr = io::BufReader::new(&mut stream);
-    let mut header = Header::new();
-    loop {
-        let mut line = String::new();
-        match rdr.read_line(&mut line).await? {
-            0 => break, // eof
-            2 => break, // empty line \r\n = end of header line
-            _n => header.parse(&line),
-        }
-    }
-
+pub async fn upgrade(stream: TcpStream) -> Result<Upgrade, Error> {
+    let (mut ws_stream, header) = parse_http_headers(stream).await?;
     if header.is_ws_upgrade() {
-        stream.write_all(header.upgrade_response().as_bytes()).await?;
+        ws_stream.write_all(header.upgrade_response().as_bytes()).await?;
         return Ok(Upgrade {
-            stream: stream,
+            stream: ws_stream,
             deflate_supported: header.is_deflate_supported(),
             client: false,
         });
     }
     const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
-    stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
-    Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ws upgrade header"))
+    ws_stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
+    Err(Error::InvalidUpgradeRequest)
 }
 
 #[derive(Debug)]
@@ -49,6 +40,13 @@ struct Header {
     accept: String,
 }
 
+fn split_header_line(line: &str) -> Option<(&str, &str)> {
+    let mut splitter = line.splitn(2, ':');
+    let first = splitter.next()?;
+    let second = splitter.next()?;
+    Some((first, second.trim()))
+}
+
 impl Header {
     fn new() -> Header {
         Header {
@@ -61,7 +59,7 @@ impl Header {
         }
     }
     fn parse(&mut self, line: &str) {
-        if let Some((key, value)) = parse_http_header(&line) {
+        if let Some((key, value)) = split_header_line(&line) {
             match key {
                 "Connection" => self.connection = value.to_string(),
                 "Upgrade" => self.upgrade = value.to_string(),
@@ -92,8 +90,11 @@ impl Header {
         self.extensions.contains("permessage-deflate")
     }
     fn upgrade_response(&self) -> String {
-        const HEADER: &str =
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ";
+        const HEADER: &str = "HTTP/1.1 101 Switching Protocols\r\n\
+            Upgrade: websocket\r\n\
+            Server: yarws\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Accept: ";
         let mut s = HEADER.to_string();
         s.push_str(&ws_accept(&self.key));
         s.push_str(&"\r\n");
@@ -124,50 +125,55 @@ fn ws_accept(key: &str) -> String {
     base64::encode(&hr)
 }
 
-fn parse_http_header(line: &str) -> Option<(&str, &str)> {
-    let mut splitter = line.splitn(2, ':');
-    let first = splitter.next()?;
-    let second = splitter.next()?;
-    Some((first, second.trim()))
-}
-
-pub async fn connect(mut stream: TcpStream, url: &str) -> io::Result<Upgrade> {
+pub async fn connect(mut stream: TcpStream, host: &str, path: &str) -> Result<Upgrade, Error> {
     let key = connect_key();
-    stream.write_all(connect_header(url, &key).as_bytes()).await?;
+    stream.write_all(connect_header(host, path, &key).as_bytes()).await?;
 
-    let mut rdr = io::BufReader::new(&mut stream);
-    let mut header = Header::new();
-    loop {
-        let mut line = String::new();
-        match rdr.read_line(&mut line).await? {
-            0 => break, // eof
-            2 => break, // empty line \r\n = end of header line
-            _n => header.parse(&line),
-        }
-    }
-
+    let (ws_stream, header) = parse_http_headers(stream).await?;
     if header.is_ws_connect(&key) {
         return Ok(Upgrade {
-            stream: stream,
+            stream: ws_stream,
             deflate_supported: header.is_deflate_supported(),
             client: true,
         });
     }
-    Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ws header"))
+    Err(Error::InvalidUpgradeRequest)
 }
 
-fn connect_header(url: &str, key: &str) -> String {
-    let mut h = "GET / HTTP/1.1\r\n\
+async fn parse_http_headers(mut stream: TcpStream) -> Result<(TcpStream, Header), Error> {
+    let mut header = Header::new();
+    let mut line: Vec<u8> = Vec::new();
+    loop {
+        let byte = stream.read_u8().await?;
+        if byte == 13 {
+            continue;
+        }
+        if byte == 10 {
+            if line.len() == 0 {
+                break;
+            }
+            header.parse(&str::from_utf8(&line)?);
+            line = Vec::new();
+            continue;
+        }
+        line.push(byte);
+    }
+    Ok((stream, header))
+}
+
+fn connect_header(host: &str, path: &str, key: &str) -> String {
+    let mut h = "GET ".to_owned()
+        + path
+        + " HTTP/1.1\r\n\
 Connection: Upgrade\r\n\
 Upgrade: websocket\r\n\
 Sec-WebSocket-Version: 13\r\n\
 Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\
-Sec-WebSocket-Key: "
-        .to_owned();
+Sec-WebSocket-Key: ";
     h.push_str(key);
     h.push_str("\r\n");
     h.push_str("Host: ");
-    h.push_str(url);
+    h.push_str(host);
     h.push_str("\r\n\r\n");
     h
 }
@@ -209,6 +215,6 @@ mod tests {
     fn ws_key() {
         let k = connect_key();
         println!("key {}", k);
-        println!("{}", connect_header(&k, "minus5.hr"));
+        //println!("{}", connect_header(&k, "minus5.hr"));
     }
 }

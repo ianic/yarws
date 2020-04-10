@@ -15,7 +15,7 @@ struct Args {
 
 impl Args {
     fn addr(&self) -> String {
-        format!("{}:{}", self.ip, self.port)
+        format!("{}:{}/getCaseCount", self.ip, self.port)
     }
 }
 
@@ -37,10 +37,10 @@ async fn main() {
     }
 }
 
-async fn handler(mut s: yarws::Session, log: Logger) -> Result<(), yarws::Error> {
-    s.send("pero zdero").await?;
-    if let Some(text) = s.receive().await? {
-        debug!(log, "{}", text);
+async fn handler(mut s: yarws::Session, _log: Logger) -> Result<(), yarws::Error> {
+    while let Some(m) = s.rx.recv().await {
+        println!("vratio mi je {:?}", m);
+        s.tx.send(m).await?;
     }
     Ok(())
 }

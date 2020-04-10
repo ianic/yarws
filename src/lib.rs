@@ -8,6 +8,7 @@ use tokio::spawn;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use url::Url;
 
 #[macro_use]
 extern crate slog;
@@ -106,6 +107,8 @@ pub enum Msg {
 
 #[derive(Fail, Debug)]
 pub enum Error {
+    #[fail(display = "invalid upgrade request")]
+    InvalidUpgradeRequest,
     #[fail(display = "IO error: {}", error)]
     IoError { error: io::Error },
     #[fail(display = "fail to send message upstream: {}", error)]
@@ -118,6 +121,8 @@ pub enum Error {
     InflateFailed(String),
     #[fail(display = "text payload not a valid utf-8 string: {}", _0)]
     TextPayloadNotValidUTF8(std::str::Utf8Error),
+    #[fail(display = "failed to parse url: {} error: {}", url, error)]
+    UrlParseError { url: String, error: url::ParseError },
 }
 
 impl From<io::Error> for Error {
@@ -136,11 +141,41 @@ impl From<mpsc::error::SendError<Vec<u8>>> for Error {
     }
 }
 
-pub async fn connect(addr: String, log: Logger) -> Result<Session, Error> {
+impl From<std::str::Utf8Error> for Error {
+    fn from(e: std::str::Utf8Error) -> Self {
+        Error::TextPayloadNotValidUTF8(e)
+    }
+}
+
+pub async fn connect(url: &str, log: Logger) -> Result<Session, Error> {
+    let (addr, path) = parse_url(url)?;
     let stream = TcpStream::connect(&addr).await?;
-    let upgrade = http::connect(stream, &addr).await?;
+    let upgrade = http::connect(stream, &addr, &path).await?;
     let (rx, tx) = ws::handle(upgrade, log.clone()).await;
     Ok(Session { no: 1, rx: rx, tx: tx })
+}
+
+fn parse_url(u: &str) -> Result<(String, String), Error> {
+    let url = match match Url::parse(u) {
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            let url = "ws://".to_owned() + u;
+            Url::parse(&url)
+        }
+        other => other,
+    } {
+        Err(e) => Err(Error::UrlParseError {
+            url: u.to_owned(),
+            error: e,
+        }),
+        Ok(v) => Ok(v),
+    }?;
+    let host = url.host_str().unwrap_or("");
+    let addr = format!("{}:{}", host, url.port_or_known_default().unwrap_or(0));
+    let path = match url.query() {
+        Some(q) => format!("{}?{}", url.path(), q),
+        None => url.path().to_owned(),
+    };
+    Ok((addr, path))
 }
 
 /*
@@ -150,3 +185,30 @@ TODOs
 - client messages should be masked
 - znamo samo primati komprimirane poruke, ne i komprimirati
 */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_parse_url() {
+        let (addr, path) = parse_url("ws://localhost:9001/path?pero=zdero").unwrap();
+        assert_eq!("localhost:9001", addr);
+        assert_eq!("/path?pero=zdero", path);
+
+        let (addr, path) = parse_url("ws://localhost:9001/path").unwrap();
+        assert_eq!("localhost:9001", addr);
+        assert_eq!("/path", path);
+
+        let (addr, path) = parse_url("ws://localhost/path").unwrap();
+        assert_eq!("localhost:80", addr);
+        assert_eq!("/path", path);
+
+        let (addr, path) = parse_url("localhost/path").unwrap();
+        assert_eq!("localhost:80", addr);
+        assert_eq!("/path", path);
+
+        let (addr, path) = parse_url("pero://localhost/path").unwrap();
+        assert_eq!("localhost:0", addr);
+        assert_eq!("/path", path);
+    }
+}

@@ -19,6 +19,7 @@ pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Ms
     let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
     let (session_tx, session_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
     let (conn_tx, conn_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+    let mask_frames = hu.client;
 
     // writes raw ws frames to the tcp socket; raw_rx -> soc_tx
     raw_frame2socket(raw_rx, soc_tx, log.clone());
@@ -26,7 +27,14 @@ pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Ms
     // reads tcp socket, parse incoming stream as ws frames and then into application messages
     // soc_rx -> raw_tx       - for control frames
     //        -> session_tx   - for data frames
-    let mut conn = Conn::new(hu.deflate_supported, soc_rx, raw_tx.clone(), session_tx, log.clone());
+    let mut conn = Conn::new(
+        hu.deflate_supported,
+        mask_frames,
+        soc_rx,
+        raw_tx.clone(),
+        session_tx,
+        log.clone(),
+    );
     spawn(async move {
         if let Err(e) = conn.read().await {
             error!(conn.log, "{}", e);
@@ -47,6 +55,7 @@ fn raw_frame2socket(mut raw_rx: Receiver<Vec<u8>>, mut soc_tx: WriteHalf<TcpStre
                 break;
             }
         }
+        trace!(log, "write half closed")
     });
 }
 
@@ -73,6 +82,7 @@ impl Msg {
 
 struct Conn {
     deflate_supported: bool,
+    mask_frames: bool,
     soc_rx: ReadHalf<TcpStream>,
     raw_tx: Sender<Vec<u8>>,
     session_tx: Sender<Msg>,
@@ -83,6 +93,7 @@ struct Conn {
 impl Conn {
     fn new(
         deflate_supported: bool,
+        mask_frames: bool,
         soc_rx: ReadHalf<TcpStream>,
         raw_tx: Sender<Vec<u8>>,
         session_tx: Sender<Msg>,
@@ -90,6 +101,7 @@ impl Conn {
     ) -> Conn {
         Conn {
             deflate_supported: deflate_supported,
+            mask_frames: mask_frames,
             soc_rx: soc_rx,
             raw_tx: raw_tx,
             session_tx: session_tx,
@@ -136,6 +148,7 @@ impl Conn {
 
             frame.validate(self.deflate_supported, fragment.is_some())?;
             if frame.is_fragment() {
+                trace!(self.log, "fragment" ;"opcode" =>  frame.opcode.desc(), "len" => frame.payload_len);
                 let (new_frame, new_fragment) = frame.to_fragment(fragment);
                 fragment = new_fragment;
                 match new_frame {
@@ -152,14 +165,16 @@ impl Conn {
                 break;
             }
         }
+        trace!(self.log, "read half closed");
         Ok(())
     }
 
     async fn handle_frame(&mut self, frame: Frame) -> Result<(), Error> {
         match frame.opcode.value() {
             TEXT | BINARY => self.session_tx.send(frame.to_msg()).await?,
-            CLOSE => self.raw_tx.send(FrameWriter::close()).await?,
-            PING => self.raw_tx.send(frame.to_pong()).await?,
+            //CLOSE => self.raw_tx.send(FrameWriter::close()).await?,
+            CLOSE => self.raw_tx.send(frame.to_close(self.mask_frames)).await?,
+            PING => self.raw_tx.send(frame.to_pong(self.mask_frames)).await?,
             PONG | _ => (),
         }
         Ok(())
@@ -183,7 +198,7 @@ struct Frame {
 const CONTINUATION: u8 = 0;
 const TEXT: u8 = 1;
 const BINARY: u8 = 2;
-// constrol frame types
+// control frame types
 const CLOSE: u8 = 8;
 const PING: u8 = 9;
 const PONG: u8 = 10;
@@ -244,7 +259,7 @@ impl fmt::Display for Opcode {
     }
 }
 
-enum Fragmet {
+enum Fragment {
     Start,
     Middle,
     End,
@@ -283,7 +298,7 @@ impl Frame {
     }
 
     fn set_header(&mut self, buf: &[u8]) {
-        let mask_start = buf.len() - 4;
+        let mask_start = if self.mask { buf.len() - 4 } else { buf.len() };
         if mask_start == 8 {
             let bytes: [u8; 8] = [buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]];
             self.payload_len = u64::from_be_bytes(bytes);
@@ -292,8 +307,10 @@ impl Frame {
             let bytes: [u8; 2] = [buf[0], buf[1]];
             self.payload_len = u16::from_be_bytes(bytes) as u64;
         }
-        for i in 0..4 {
-            self.masking_key[i] = buf[mask_start + i];
+        if self.mask {
+            for i in 0..4 {
+                self.masking_key[i] = buf[mask_start + i];
+            }
         }
     }
 
@@ -329,7 +346,7 @@ impl Frame {
                 return Err(Error::WrongHeader("fragmented control frame".to_owned()));
             }
         } else {
-            // continuation (waiting for more fragmets) frames must be in order start/middle.../end
+            // continuation (waiting for more fragments) frames must be in order start/middle.../end
             if !in_continuation && self.opcode.continuation() {
                 return Err(Error::WrongHeader("not in continuation".to_owned()));
             }
@@ -349,10 +366,7 @@ impl Frame {
         if !self.opcode.text() {
             return Ok(());
         }
-        match str::from_utf8(&self.payload) {
-            Ok(s) => self.text_payload = s.to_owned(),
-            Err(e) => return Err(Error::TextPayloadNotValidUTF8(e)),
-        }
+        self.text_payload = str::from_utf8(&self.payload)?.to_owned();
         Ok(())
     }
 
@@ -366,17 +380,17 @@ impl Frame {
         Ok(())
     }
 
-    fn fragmet(&self) -> Fragmet {
+    fn fragment(&self) -> Fragment {
         if !self.fin && self.opcode.data() {
-            return Fragmet::Start;
+            return Fragment::Start;
         }
         if !self.fin && self.opcode.continuation() {
-            return Fragmet::Middle;
+            return Fragment::Middle;
         }
         if self.fin && self.opcode.continuation() {
-            return Fragmet::End;
+            return Fragment::End;
         }
-        Fragmet::None
+        Fragment::None
     }
     fn is_fragment(&self) -> bool {
         !(self.fin && !self.opcode.continuation())
@@ -386,19 +400,19 @@ impl Frame {
     // returns frame, and fragment
     // if frame is None it is not completed
     fn to_fragment(self, fragment: Option<Frame>) -> (Option<Frame>, Option<Frame>) {
-        match self.fragmet() {
-            Fragmet::Start => (None, Some(self)),
-            Fragmet::Middle => {
+        match self.fragment() {
+            Fragment::Start => (None, Some(self)),
+            Fragment::Middle => {
                 let mut f = fragment.unwrap();
                 f.append(&self);
                 (None, Some(f))
             }
-            Fragmet::End => {
+            Fragment::End => {
                 let mut f = fragment.unwrap();
                 f.append(&self);
                 (Some(f), None)
             }
-            Fragmet::None => (Some(self), fragment),
+            Fragment::None => (Some(self), fragment),
         }
     }
 
@@ -406,8 +420,25 @@ impl Frame {
         self.opcode.close()
     }
 
-    fn to_pong(self) -> Vec<u8> {
-        FrameWriter::control(PONG, self.payload)
+    fn to_pong(self, mask_frames: bool) -> Vec<u8> {
+        FrameWriter::new(mask_frames).pong(self.payload)
+        //FrameWriter::control(PONG, self.payload)
+    }
+
+    fn to_close(self, mask_frames: bool) -> Vec<u8> {
+        let mut payload: Vec<u8> = Vec::new();
+        if self.payload_len == 2 {
+            let bytes: [u8; 2] = [self.payload[0], self.payload[1]];
+            let status = u16::from_be_bytes(bytes);
+            let status = match status {
+                1000 | 1001 | 1002 | 1003 | 1007 | 1008 | 1009 | 1010 | 1011 => status, // valid status code, reply with that code
+                _ => 0, // for all other reply with close frame without payload
+            };
+            if status > 0 {
+                payload.extend_from_slice(&status.to_be_bytes());
+            }
+        }
+        FrameWriter::new(mask_frames).close(payload)
     }
 
     fn append(&mut self, other: &Frame) -> &Frame {
@@ -445,19 +476,27 @@ impl FrameWriter {
         Self { mask: mask }
     }
 
-    #[allow(dead_code)]
-    fn unmasked() -> Self {
-        Self { mask: false }
+    // #[allow(dead_code)]
+    // fn unmasked() -> Self {
+    //     Self { mask: false }
+    // }
+
+    // fn close() -> Vec<u8> {
+    //     vec![0b1000_1000u8, 0b0000_0000u8]
+    // }
+
+    // // control frames are not masked
+    // fn control(opcode: u8, payload: Vec<u8>) -> Vec<u8> {
+    //     let fw = Self::new(false);
+    //     fw.build(opcode, payload)
+    // }
+
+    fn pong(&self, payload: Vec<u8>) -> Vec<u8> {
+        self.build(PONG, payload)
     }
 
-    fn close() -> Vec<u8> {
-        vec![0b1000_1000u8, 0b0000_0000u8]
-    }
-
-    // control frames are not masked
-    fn control(opcode: u8, payload: Vec<u8>) -> Vec<u8> {
-        let fw = Self::new(false);
-        fw.build(opcode, payload)
+    fn close(&self, payload: Vec<u8>) -> Vec<u8> {
+        self.build(CLOSE, payload)
     }
 
     fn binary(&self, payload: Vec<u8>) -> Vec<u8> {
@@ -491,7 +530,7 @@ impl FrameWriter {
     fn build(&self, opcode: u8, mut payload: Vec<u8>) -> Vec<u8> {
         let mut buf = vec![0b1000_0000u8 + opcode];
 
-        // add peyload length
+        // add payload length
         let l = payload.len();
         if l < 126 {
             buf.push(l as u8);
@@ -522,7 +561,7 @@ mod tests {
     use miniz_oxide::inflate::decompress_to_vec;
 
     fn text_frame(text: &str) -> Vec<u8> {
-        FrameWriter::unmasked().text(text.to_owned())
+        FrameWriter::new(false).text(text.to_owned())
     }
 
     #[test]

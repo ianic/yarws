@@ -182,7 +182,6 @@ fn parse_url(u: &str) -> Result<(String, String), Error> {
 TODOs
 - clean exit
 - how to use logger into library
-- client messages should be masked
 - znamo samo primati komprimirane poruke, ne i komprimirati
 */
 

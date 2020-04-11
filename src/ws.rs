@@ -50,6 +50,38 @@ pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Ms
     (socket_rx, socket_tx)
 }
 
+fn writer2(
+    mut stream_tx: WriteHalf<TcpStream>,
+    mut writer_rx: Receiver<Msg>,
+    mask_frames: bool,
+    log: Logger,
+) -> Sender<Vec<u8>> {
+    let (control_tx, mut raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+    spawn(async move {
+        loop {
+            tokio::select! {
+             Some(v) = raw_rx.recv() => {
+                if let Err(e) = stream_tx.write(&v).await {
+                    error!(log, "{}", e);
+                    break;
+                }
+             },
+            Some(m) = writer_rx.recv() => {
+                let raw = m.as_raw(mask_frames);
+                if let Err(e) = stream_tx.write(&raw).await {
+                    error!(log, "{}", e);
+                    break;
+                }
+              },
+              else => {
+                  break;
+              }
+            }
+        }
+    });
+    control_tx
+}
+
 fn writer(
     stream_tx: WriteHalf<TcpStream>,
     writer_rx: Receiver<Msg>,
@@ -57,12 +89,17 @@ fn writer(
     log: Logger,
 ) -> Sender<Vec<u8>> {
     let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
-    raw_frame2stream(raw_rx, stream_tx, log.clone());
-    msg2raw_frame(writer_rx, raw_tx.clone(), mask_frames, log);
-    raw_tx
+    let control_tx = raw_tx.clone();
+
+    // out loop writes raw data to the tcp stream
+    writer_out_loop(raw_rx, stream_tx, log.clone());
+    // inner loop transforms Msg from upstream application to the raw data
+    writer_inner_loop(writer_rx, raw_tx, mask_frames, log);
+
+    control_tx // reader controll messages are passed to the out loop
 }
 
-fn raw_frame2stream(mut raw_rx: Receiver<Vec<u8>>, mut stream_tx: WriteHalf<TcpStream>, log: Logger) {
+fn writer_out_loop(mut raw_rx: Receiver<Vec<u8>>, mut stream_tx: WriteHalf<TcpStream>, log: Logger) {
     spawn(async move {
         while let Some(v) = raw_rx.recv().await {
             if let Err(e) = stream_tx.write(&v).await {
@@ -73,7 +110,7 @@ fn raw_frame2stream(mut raw_rx: Receiver<Vec<u8>>, mut stream_tx: WriteHalf<TcpS
     });
 }
 
-fn msg2raw_frame(mut writer_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, mask_frames: bool, log: Logger) {
+fn writer_inner_loop(mut writer_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, mask_frames: bool, log: Logger) {
     spawn(async move {
         while let Some(m) = writer_rx.recv().await {
             if let Err(e) = raw_tx.send(m.as_raw(mask_frames)).await {

@@ -13,112 +13,80 @@ use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
+pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
     trace!(log, "open");
 
-    let mask_frames = hu.client;
+    let mask_frames = upgrade.client;
+    let deflate_supported = upgrade.deflate_supported;
 
     // rx receive end
     // tx transmit end
     // stream is tcp connection
     // Reader is transforming form raw tcp stream to the valid websocket frames
     // socket is websocet implementation passed downstream
-    let (stream_rx, stream_tx) = io::split(hu.stream);
+    // Writer is writing to the outbound tcp stream
+    let (stream_rx, stream_tx) = io::split(upgrade.stream);
     let (reader_tx, socket_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
     let (socket_tx, writer_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
 
-    // start reader part
-    let control_tx = writer(stream_tx, writer_rx, mask_frames, log.clone());
+    let control_tx = Writer::new(stream_tx, writer_rx, mask_frames, log.clone()).spawn();
 
-    // reads tcp stream, parse it as ws frames and converts frames into application messages
-    // stream_rx -> raw_tx      - for control frames
-    //           -> socket_tx   - for data frames
-    let mut reader = Reader::new(
-        hu.deflate_supported,
-        mask_frames,
-        stream_rx,
-        control_tx,
-        reader_tx,
-        log.clone(),
-    );
-    spawn(async move {
-        if let Err(e) = reader.read().await {
-            error!(reader.log, "{}", e);
-        }
-    });
+    Reader::new(deflate_supported, mask_frames, stream_rx, control_tx, reader_tx, log).spawn();
 
     (socket_rx, socket_tx)
 }
 
-fn writer2(
-    mut stream_tx: WriteHalf<TcpStream>,
-    mut writer_rx: Receiver<Msg>,
-    mask_frames: bool,
-    log: Logger,
-) -> Sender<Vec<u8>> {
-    let (control_tx, mut raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
-    spawn(async move {
-        loop {
-            tokio::select! {
-             Some(v) = raw_rx.recv() => {
-                if let Err(e) = stream_tx.write(&v).await {
-                    error!(log, "{}", e);
-                    break;
-                }
-             },
-            Some(m) = writer_rx.recv() => {
-                let raw = m.as_raw(mask_frames);
-                if let Err(e) = stream_tx.write(&raw).await {
-                    error!(log, "{}", e);
-                    break;
-                }
-              },
-              else => {
-                  break;
-              }
-            }
-        }
-    });
-    control_tx
-}
-
-fn writer(
+// Writer writes raw data to the outbound tcp stream
+struct Writer {
     stream_tx: WriteHalf<TcpStream>,
     writer_rx: Receiver<Msg>,
     mask_frames: bool,
     log: Logger,
-) -> Sender<Vec<u8>> {
-    let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
-    let control_tx = raw_tx.clone();
-
-    // out loop writes raw data to the tcp stream
-    writer_out_loop(raw_rx, stream_tx, log.clone());
-    // inner loop transforms Msg from upstream application to the raw data
-    writer_inner_loop(writer_rx, raw_tx, mask_frames, log);
-
-    control_tx // reader controll messages are passed to the out loop
 }
 
-fn writer_out_loop(mut raw_rx: Receiver<Vec<u8>>, mut stream_tx: WriteHalf<TcpStream>, log: Logger) {
-    spawn(async move {
-        while let Some(v) = raw_rx.recv().await {
-            if let Err(e) = stream_tx.write(&v).await {
-                error!(log, "{}", e);
-                break;
-            }
+impl Writer {
+    fn new(stream_tx: WriteHalf<TcpStream>, writer_rx: Receiver<Msg>, mask_frames: bool, log: Logger) -> Self {
+        Self {
+            stream_tx: stream_tx,
+            writer_rx: writer_rx,
+            mask_frames: mask_frames,
+            log: log,
         }
-    });
-}
+    }
 
-fn writer_inner_loop(mut writer_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, mask_frames: bool, log: Logger) {
-    spawn(async move {
-        while let Some(m) = writer_rx.recv().await {
-            if let Err(e) = raw_tx.send(m.as_raw(mask_frames)).await {
-                error!(log, "{}", e);
-                break;
+    fn spawn(self) -> Sender<Vec<u8>> {
+        let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+        let control_tx = raw_tx.clone();
+
+        // out loop writes raw data to the tcp stream
+        Writer::out_loop(raw_rx, self.stream_tx, self.log.clone());
+        // inner loop transforms Msg from upstream application to the raw data
+        Writer::inner_loop(self.writer_rx, raw_tx, self.mask_frames, self.log);
+
+        control_tx // reader controll messages are passed to the out loop through this channel
+    }
+
+    fn out_loop(mut raw_rx: Receiver<Vec<u8>>, mut stream_tx: WriteHalf<TcpStream>, log: Logger) {
+        spawn(async move {
+            while let Some(v) = raw_rx.recv().await {
+                if let Err(e) = stream_tx.write(&v).await {
+                    error!(log, "{}", e);
+                    break;
+                }
             }
-        }
-    });
+        });
+    }
+
+    fn inner_loop(mut writer_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, mask_frames: bool, log: Logger) {
+        spawn(async move {
+            while let Some(m) = writer_rx.recv().await {
+                if let Err(e) = raw_tx.send(m.as_raw(mask_frames)).await {
+                    error!(log, "{}", e);
+                    break;
+                }
+            }
+        });
+    }
 }
 
 impl Msg {
@@ -135,8 +103,8 @@ struct Reader {
     deflate_supported: bool,
     mask_frames: bool,
     stream_rx: ReadHalf<TcpStream>,
-    raw_tx: Sender<Vec<u8>>,
-    socket_tx: Sender<Msg>,
+    control_tx: Sender<Vec<u8>>,
+    reader_tx: Sender<Msg>,
     log: slog::Logger,
     header_buf: [u8; 14],
 }
@@ -146,19 +114,27 @@ impl Reader {
         deflate_supported: bool,
         mask_frames: bool,
         stream_rx: ReadHalf<TcpStream>,
-        raw_tx: Sender<Vec<u8>>,
-        socket_tx: Sender<Msg>,
+        control_tx: Sender<Vec<u8>>,
+        reader_tx: Sender<Msg>,
         log: slog::Logger,
     ) -> Reader {
         Reader {
             deflate_supported: deflate_supported,
             mask_frames: mask_frames,
             stream_rx: stream_rx,
-            raw_tx: raw_tx,
-            socket_tx: socket_tx,
+            control_tx: control_tx,
+            reader_tx: reader_tx,
             log: log,
             header_buf: [0u8; 14],
         }
+    }
+
+    fn spawn(mut self) {
+        spawn(async move {
+            if let Err(e) = self.read().await {
+                error!(self.log, "{}", e);
+            }
+        });
     }
 
     async fn read_payload(&mut self, frame: &mut Frame) -> Result<(), Error> {
@@ -222,9 +198,9 @@ impl Reader {
 
     async fn handle_frame(&mut self, frame: Frame) -> Result<(), Error> {
         match frame.opcode.value() {
-            TEXT | BINARY => self.socket_tx.send(frame.to_msg()).await?,
-            CLOSE => self.raw_tx.send(frame.to_close(self.mask_frames)).await?,
-            PING => self.raw_tx.send(frame.to_pong(self.mask_frames)).await?,
+            TEXT | BINARY => self.reader_tx.send(frame.to_msg()).await?,
+            CLOSE => self.control_tx.send(frame.to_close(self.mask_frames)).await?,
+            PING => self.control_tx.send(frame.to_pong(self.mask_frames)).await?,
             PONG | _ => (),
         }
         Ok(())
@@ -284,12 +260,6 @@ impl Opcode {
     fn close(&self) -> bool {
         self.0 == CLOSE
     }
-    // fn ping(&self) -> bool {
-    //     self.0 == 9
-    // }
-    // fn pong(&self) -> bool {
-    //     self.0 == 10
-    //}
     fn desc(&self) -> &str {
         match self.0 {
             CONTINUATION => "continuation",
@@ -525,21 +495,6 @@ impl FrameWriter {
     fn new(mask: bool) -> Self {
         Self { mask: mask }
     }
-
-    // #[allow(dead_code)]
-    // fn unmasked() -> Self {
-    //     Self { mask: false }
-    // }
-
-    // fn close() -> Vec<u8> {
-    //     vec![0b1000_1000u8, 0b0000_0000u8]
-    // }
-
-    // // control frames are not masked
-    // fn control(opcode: u8, payload: Vec<u8>) -> Vec<u8> {
-    //     let fw = Self::new(false);
-    //     fw.build(opcode, payload)
-    // }
 
     fn pong(&self, payload: Vec<u8>) -> Vec<u8> {
         self.build(PONG, payload)

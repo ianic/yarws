@@ -156,7 +156,7 @@ impl Reader {
         }
         let mut frame = Frame::new(self.header_buf[0], self.header_buf[1]);
 
-        if let Some(l) = frame.header_len() {
+        if let Some(l) = frame.var_header_len() {
             let b = &mut self.header_buf[2..l + 2];
             self.stream_rx.read_exact(b).await?;
             frame.set_header(b);
@@ -185,7 +185,7 @@ impl Reader {
             }
             frame.validate_payload()?;
 
-            trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "len" => frame.payload_len);
+            trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len, "header_len" => frame.header_len, "mask" => frame.mask);
             let is_close = frame.is_close();
             self.handle_frame(frame).await?;
             if is_close {
@@ -215,6 +215,7 @@ struct Frame {
     mask: bool,
     opcode: Opcode,
     payload_len: u64,
+    header_len: u8,
     masking_key: [u8; 4],
     payload: Vec<u8>,
     text_payload: String,
@@ -296,6 +297,7 @@ impl Frame {
             opcode: Opcode::new(opcode),
             mask: byte2 & 0b1000_0000u8 != 0,
             payload_len: (byte2 & 0b0111_1111u8) as u64,
+            header_len: 2,
             masking_key: [0; 4],
             payload: vec![0; 0],
             text_payload: String::new(),
@@ -303,7 +305,7 @@ impl Frame {
     }
 
     // length of the rest of the header after first two bytes
-    fn header_len(&self) -> Option<usize> {
+    fn var_header_len(&mut self) -> Option<usize> {
         if !self.mask && self.payload_len < 126 {
             return None;
         }
@@ -314,6 +316,7 @@ impl Frame {
                 n += 6;
             }
         }
+        self.header_len = n as u8 + 2;
         Some(n)
     }
 

@@ -1,46 +1,39 @@
-use slog::Logger;
 use structopt::StructOpt;
-
-#[macro_use]
-extern crate slog;
 
 #[derive(StructOpt, Debug)]
 struct Args {
-    #[structopt(short = "p", long = "port", default_value = "9001")]
-    port: usize,
-
-    #[structopt(short = "i", long = "bind-ip", default_value = "127.0.0.1")]
-    ip: String,
-}
-
-impl Args {
-    fn addr(&self) -> String {
-        format!("{}:{}", self.ip, self.port)
-    }
+    #[structopt(default_value = "ws://127.0.0.1:9001")]
+    url: String,
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), yarws::Error> {
     let args = Args::from_args();
-    let log = yarws::log::config();
+    let socket = yarws::connect(&args.url, None).await?;
+    let mut caller = Caller { socket: socket };
 
-    let socket = match yarws::connect(&args.addr(), log.clone()).await {
-        Ok(s) => s,
-        Err(e) => {
-            error!(log, "{}", e);
-            return;
-        }
-    };
+    let data = "01234567890abcdefghijklmnopqrstuvwxyz"; //36 characters
+    let sizes = vec![1, 36, 125, 126, 127, 65535, 65536, 65537];
+    for size in sizes {
+        let rep = size / data.len() + 1;
+        let req = &data.repeat(rep)[0..size];
 
-    if let Err(e) = handler(socket, log.clone()).await {
-        error!(log, "{}", e);
-    }
-}
-
-async fn handler(mut socket: yarws::Socket, log: Logger) -> Result<(), yarws::Error> {
-    socket.send("pero zdero").await?;
-    if let Some(text) = socket.receive().await? {
-        debug!(log, "{}", text);
+        let rsp = caller.call(req).await?;
+        assert_eq!(req, rsp);
     }
     Ok(())
+}
+
+struct Caller {
+    socket: yarws::Socket,
+}
+
+impl Caller {
+    async fn call(&mut self, req: &str) -> Result<String, yarws::Error> {
+        self.socket.send(req).await?;
+        if let Some(text) = self.socket.receive().await? {
+            return Ok(text);
+        }
+        Ok(String::new())
+    }
 }

@@ -147,7 +147,9 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
-pub async fn connect(url: &str, log: Logger) -> Result<Socket, Error> {
+//pub async fn connect(url: &str, log: Logger) -> Result<Socket, Error> {
+pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
+    let log = log.into().unwrap_or(log::null());
     let (addr, path) = parse_url(url)?;
     let stream = TcpStream::connect(&addr).await?;
     let upgrade = http::connect(stream, &addr, &path).await?;

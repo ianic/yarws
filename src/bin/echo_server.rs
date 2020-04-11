@@ -30,17 +30,17 @@ async fn main() {
 
     match yarws::Server::bind(args.addr(), log.clone()).await {
         Ok(srv) => {
-            let mut sessions = srv.sessions().await;
-            while let Some(session) = sessions.recv().await {
+            let mut socket = srv.listen().await;
+            while let Some(socket) = socket.recv().await {
                 let res = if args.reverse {
-                    reverse_echo(session.rx, session.tx).await
+                    reverse_echo(socket.rx, socket.tx).await
                 } else {
-                    echo(session.rx, session.tx).await
+                    echo(socket.rx, socket.tx).await
                 };
                 if let Err(e) = res {
-                    error!(log, "session error: {}", e);
+                    error!(log, "socket error: {}", e);
                 } else {
-                    trace!(log, "session closed"; "conn" => session.no);
+                    trace!(log, "socket closed"; "conn" => socket.no);
                 }
             }
         }

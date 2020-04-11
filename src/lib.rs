@@ -23,13 +23,13 @@ mod http;
 pub mod log;
 mod ws;
 
-pub struct Session {
+pub struct Socket {
     pub no: usize,
     pub tx: Sender<Msg>,
     pub rx: Receiver<Msg>,
 }
 
-impl Session {
+impl Socket {
     pub async fn send(&mut self, text: &str) -> Result<(), Error> {
         self.tx.send(Msg::Text(text.to_owned())).await?;
         Ok(())
@@ -62,36 +62,36 @@ impl Server {
         })
     }
 
-    pub async fn sessions(mut self) -> Receiver<Session> {
-        let (session_tx, session_rx): (Sender<Session>, Receiver<Session>) = mpsc::channel(16);
+    pub async fn listen(mut self) -> Receiver<Socket> {
+        let (socket_tx, socket_rx): (Sender<Socket>, Receiver<Socket>) = mpsc::channel(16);
 
         let mut conn_no = 0;
         spawn(async move {
             let mut incoming = self.listener.incoming();
             while let Some(conn) = incoming.next().await {
                 match conn {
-                    Ok(sock) => {
+                    Ok(stream) => {
                         conn_no += 1;
                         let log = self.log.new(o!("conn" => conn_no));
-                        let stx = session_tx.clone();
-                        spawn(async move { handle_socket(sock, conn_no, stx, log).await });
+                        let stx = socket_tx.clone();
+                        spawn(async move { handle_stream(stream, conn_no, stx, log).await });
                     }
                     Err(e) => error!(self.log, "accept error: {}", e),
                 }
             }
         });
 
-        session_rx
+        socket_rx
     }
 }
 
-async fn handle_socket(sock: TcpStream, no: usize, mut sessions_tx: Sender<Session>, log: Logger) {
-    match http::upgrade(sock).await {
+async fn handle_stream(stream: TcpStream, no: usize, mut sockets_tx: Sender<Socket>, log: Logger) {
+    match http::upgrade(stream).await {
         Ok(u) => {
             let (rx, tx) = ws::handle(u, log.clone()).await;
-            let s = Session { no: no, rx: rx, tx: tx };
-            if let Err(e) = sessions_tx.send(s).await {
-                error!(log, "unable to start session: {}", e);
+            let s = Socket { no: no, rx: rx, tx: tx };
+            if let Err(e) = sockets_tx.send(s).await {
+                error!(log, "unable to open socket: {}", e);
             }
         }
         Err(e) => error!(log, "upgrade error: {}", e),
@@ -147,12 +147,12 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
-pub async fn connect(url: &str, log: Logger) -> Result<Session, Error> {
+pub async fn connect(url: &str, log: Logger) -> Result<Socket, Error> {
     let (addr, path) = parse_url(url)?;
     let stream = TcpStream::connect(&addr).await?;
     let upgrade = http::connect(stream, &addr, &path).await?;
     let (rx, tx) = ws::handle(upgrade, log.clone()).await;
-    Ok(Session { no: 1, rx: rx, tx: tx })
+    Ok(Socket { no: 1, rx: rx, tx: tx })
 }
 
 fn parse_url(u: &str) -> Result<(String, String), Error> {

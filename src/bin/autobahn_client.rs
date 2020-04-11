@@ -22,7 +22,7 @@ async fn main() -> Result<(), yarws::Error> {
     for i in 1..(cc + 1) {
         let l = log.new(o!("conn" => i));
         let url = format!("{}/runCase?case={}&agent=yarws", &args.url, i);
-        let session = match yarws::connect(&url, l).await {
+        let socket = match yarws::connect(&url, l).await {
             Ok(s) => s,
             Err(e) => {
                 error!(log, "{}", e);
@@ -30,7 +30,7 @@ async fn main() -> Result<(), yarws::Error> {
             }
         };
 
-        if let Err(e) = echo(session, log.clone()).await {
+        if let Err(e) = echo(socket, log.clone()).await {
             error!(log, "{}", e);
         }
     }
@@ -40,25 +40,25 @@ async fn main() -> Result<(), yarws::Error> {
     Ok(())
 }
 
-async fn echo(mut s: yarws::Session, _log: Logger) -> Result<(), yarws::Error> {
-    while let Some(m) = s.rx.recv().await {
-        s.tx.send(m).await?;
+async fn echo(mut socket: yarws::Socket, _log: Logger) -> Result<(), yarws::Error> {
+    while let Some(msg) = socket.rx.recv().await {
+        socket.tx.send(msg).await?;
     }
     Ok(())
 }
 
 async fn generate_report(root: &str, log: Logger) -> Result<(), yarws::Error> {
     let url = root.to_owned() + "/updateReports?agent=yarws";
-    let mut session = yarws::connect(&url, log).await?;
-    while let Some(_m) = session.rx.recv().await {}
+    let mut socket = yarws::connect(&url, log).await?;
+    while let Some(_msg) = socket.rx.recv().await {}
     Ok(())
 }
 
 async fn get_case_count(root: &str, log: Logger) -> Result<usize, yarws::Error> {
     let url = root.to_owned() + "/getCaseCount";
-    let mut session = yarws::connect(&url, log).await?;
-    if let Some(s) = session.receive().await? {
-        if let Ok(i) = s.as_str().parse::<usize>() {
+    let mut socket = yarws::connect(&url, log).await?;
+    if let Some(msg) = socket.receive().await? {
+        if let Ok(i) = msg.as_str().parse::<usize>() {
             return Ok(i);
         }
     }

@@ -15,36 +15,43 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
     trace!(log, "open");
-    let (soc_rx, soc_tx) = io::split(hu.stream);
+
+    // rx receive end
+    // tx transmit end
+    // stream is tcp connection
+    // Reader is trasforming form raw tcp stream to the valid websocket frames
+    // socket is internal representation of websocket connection
+    //
+    let (stream_rx, stream_tx) = io::split(hu.stream);
     let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
-    let (session_tx, session_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+    let (socket_tx, socket_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
     let (conn_tx, conn_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
     let mask_frames = hu.client;
 
     // writes raw ws frames to the tcp socket; raw_rx -> soc_tx
-    raw_frame2socket(raw_rx, soc_tx, log.clone());
+    raw_frame2socket(raw_rx, stream_tx, log.clone());
 
-    // reads tcp socket, parse incoming stream as ws frames and then into application messages
-    // soc_rx -> raw_tx       - for control frames
-    //        -> session_tx   - for data frames
-    let mut conn = Conn::new(
+    // reads tcp stream, parse it as ws frames and converts frames into application messages
+    // stream_rx -> raw_tx      - for control frames
+    //           -> socket_tx   - for data frames
+    let mut reader = Reader::new(
         hu.deflate_supported,
         mask_frames,
-        soc_rx,
+        stream_rx,
         raw_tx.clone(),
-        session_tx,
+        socket_tx,
         log.clone(),
     );
     spawn(async move {
-        if let Err(e) = conn.read().await {
-            error!(conn.log, "{}", e);
+        if let Err(e) = reader.read().await {
+            error!(reader.log, "{}", e);
         }
     });
 
     // transforms application Msg to raw; conn_rx -> raw_tx
     msg2raw_frame(conn_rx, raw_tx, hu.client, log.clone());
 
-    (session_rx, conn_tx)
+    (socket_rx, conn_tx)
 }
 
 fn raw_frame2socket(mut raw_rx: Receiver<Vec<u8>>, mut soc_tx: WriteHalf<TcpStream>, log: Logger) {
@@ -80,31 +87,31 @@ impl Msg {
     }
 }
 
-struct Conn {
+struct Reader {
     deflate_supported: bool,
     mask_frames: bool,
-    soc_rx: ReadHalf<TcpStream>,
+    stream_rx: ReadHalf<TcpStream>,
     raw_tx: Sender<Vec<u8>>,
-    session_tx: Sender<Msg>,
+    socket_tx: Sender<Msg>,
     log: slog::Logger,
     header_buf: [u8; 14],
 }
 
-impl Conn {
+impl Reader {
     fn new(
         deflate_supported: bool,
         mask_frames: bool,
-        soc_rx: ReadHalf<TcpStream>,
+        stream_rx: ReadHalf<TcpStream>,
         raw_tx: Sender<Vec<u8>>,
-        session_tx: Sender<Msg>,
+        socket_tx: Sender<Msg>,
         log: slog::Logger,
-    ) -> Conn {
-        Conn {
+    ) -> Reader {
+        Reader {
             deflate_supported: deflate_supported,
             mask_frames: mask_frames,
-            soc_rx: soc_rx,
+            stream_rx: stream_rx,
             raw_tx: raw_tx,
-            session_tx: session_tx,
+            socket_tx: socket_tx,
             log: log,
             header_buf: [0u8; 14],
         }
@@ -114,14 +121,14 @@ impl Conn {
         let l = frame.payload_len as usize;
         if l > 0 {
             let mut buf = vec![0u8; l];
-            self.soc_rx.read_exact(&mut buf).await?;
+            self.stream_rx.read_exact(&mut buf).await?;
             frame.set_payload(buf.to_vec());
         }
         Ok(())
     }
 
     async fn read_header(&mut self) -> Result<Option<Frame>, Error> {
-        if let Err(e) = self.soc_rx.read_exact(&mut self.header_buf[0..2]).await {
+        if let Err(e) = self.stream_rx.read_exact(&mut self.header_buf[0..2]).await {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 return Ok(None);
             }
@@ -131,7 +138,7 @@ impl Conn {
 
         if let Some(l) = frame.header_len() {
             let b = &mut self.header_buf[2..l + 2];
-            self.soc_rx.read_exact(b).await?;
+            self.stream_rx.read_exact(b).await?;
             frame.set_header(b);
         }
         Ok(Some(frame))
@@ -171,8 +178,7 @@ impl Conn {
 
     async fn handle_frame(&mut self, frame: Frame) -> Result<(), Error> {
         match frame.opcode.value() {
-            TEXT | BINARY => self.session_tx.send(frame.to_msg()).await?,
-            //CLOSE => self.raw_tx.send(FrameWriter::close()).await?,
+            TEXT | BINARY => self.socket_tx.send(frame.to_msg()).await?,
             CLOSE => self.raw_tx.send(frame.to_close(self.mask_frames)).await?,
             PING => self.raw_tx.send(frame.to_pong(self.mask_frames)).await?,
             PONG | _ => (),

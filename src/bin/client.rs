@@ -24,7 +24,7 @@ async fn main() {
     let args = Args::from_args();
     let log = yarws::log::config();
 
-    let session = match yarws::connect(&args.addr(), log.clone()).await {
+    let socket = match yarws::connect(&args.addr(), log.clone()).await {
         Ok(s) => s,
         Err(e) => {
             error!(log, "{}", e);
@@ -32,14 +32,14 @@ async fn main() {
         }
     };
 
-    if let Err(e) = handler(session, log.clone()).await {
+    if let Err(e) = handler(socket, log.clone()).await {
         error!(log, "{}", e);
     }
 }
 
-async fn handler(mut s: yarws::Session, log: Logger) -> Result<(), yarws::Error> {
-    s.send("pero zdero").await?;
-    if let Some(text) = s.receive().await? {
+async fn handler(mut socket: yarws::Socket, log: Logger) -> Result<(), yarws::Error> {
+    socket.send("pero zdero").await?;
+    if let Some(text) = socket.receive().await? {
         debug!(log, "{}", text);
     }
     Ok(())

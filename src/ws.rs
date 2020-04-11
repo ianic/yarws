@@ -16,20 +16,19 @@ use tokio::sync::mpsc::{Receiver, Sender};
 pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
     trace!(log, "open");
 
+    let mask_frames = hu.client;
+
     // rx receive end
     // tx transmit end
     // stream is tcp connection
-    // Reader is trasforming form raw tcp stream to the valid websocket frames
-    // socket is internal representation of websocket connection
-    //
+    // Reader is transforming form raw tcp stream to the valid websocket frames
+    // socket is websocet implementation passed downstream
     let (stream_rx, stream_tx) = io::split(hu.stream);
-    let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
-    let (socket_tx, socket_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
-    let (conn_tx, conn_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
-    let mask_frames = hu.client;
+    let (reader_tx, socket_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+    let (socket_tx, writer_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
 
-    // writes raw ws frames to the tcp socket; raw_rx -> soc_tx
-    raw_frame2socket(raw_rx, stream_tx, log.clone());
+    // start reader part
+    let control_tx = writer(stream_tx, writer_rx, mask_frames, log.clone());
 
     // reads tcp stream, parse it as ws frames and converts frames into application messages
     // stream_rx -> raw_tx      - for control frames
@@ -38,8 +37,8 @@ pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Ms
         hu.deflate_supported,
         mask_frames,
         stream_rx,
-        raw_tx.clone(),
-        socket_tx,
+        control_tx,
+        reader_tx,
         log.clone(),
     );
     spawn(async move {
@@ -48,28 +47,36 @@ pub async fn handle(hu: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Ms
         }
     });
 
-    // transforms application Msg to raw; conn_rx -> raw_tx
-    msg2raw_frame(conn_rx, raw_tx, hu.client, log.clone());
-
-    (socket_rx, conn_tx)
+    (socket_rx, socket_tx)
 }
 
-fn raw_frame2socket(mut raw_rx: Receiver<Vec<u8>>, mut soc_tx: WriteHalf<TcpStream>, log: Logger) {
+fn writer(
+    stream_tx: WriteHalf<TcpStream>,
+    writer_rx: Receiver<Msg>,
+    mask_frames: bool,
+    log: Logger,
+) -> Sender<Vec<u8>> {
+    let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+    raw_frame2stream(raw_rx, stream_tx, log.clone());
+    msg2raw_frame(writer_rx, raw_tx.clone(), mask_frames, log);
+    raw_tx
+}
+
+fn raw_frame2stream(mut raw_rx: Receiver<Vec<u8>>, mut stream_tx: WriteHalf<TcpStream>, log: Logger) {
     spawn(async move {
         while let Some(v) = raw_rx.recv().await {
-            if let Err(e) = soc_tx.write(&v).await {
+            if let Err(e) = stream_tx.write(&v).await {
                 error!(log, "{}", e);
                 break;
             }
         }
-        trace!(log, "write half closed")
     });
 }
 
-fn msg2raw_frame(mut conn_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, client: bool, log: Logger) {
+fn msg2raw_frame(mut writer_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, mask_frames: bool, log: Logger) {
     spawn(async move {
-        while let Some(m) = conn_rx.recv().await {
-            if let Err(e) = raw_tx.send(m.as_raw(client)).await {
+        while let Some(m) = writer_rx.recv().await {
+            if let Err(e) = raw_tx.send(m.as_raw(mask_frames)).await {
                 error!(log, "{}", e);
                 break;
             }

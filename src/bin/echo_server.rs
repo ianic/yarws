@@ -46,6 +46,7 @@ async fn main() {
         }
         Err(e) => {
             error!(log, "failed to start server error: {}", e; "addr" => args.addr());
+            std::process::exit(-1);
         }
     }
 }

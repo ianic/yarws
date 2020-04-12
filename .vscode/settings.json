@@ -2,6 +2,7 @@
     "files.exclude": {
         "target": true,
         "Cargo.lock": true,
-        "LICENSE": true
+        "LICENSE": true,
+        "autobahn/reports": true,
     }
 }

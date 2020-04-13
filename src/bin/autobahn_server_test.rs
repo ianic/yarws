@@ -15,6 +15,8 @@ macro_rules! bail {
 fn main() {
     let echo_output_file = "/tmp/echo_server.out";
     let wstest_output_file = "/tmp/ws_test.out";
+    let autobahn_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/autobahn");
+    let report_file = autobahn_dir.to_string() + "/reports/server/index.json";
 
     println!("starting echo_server with output to {}", echo_output_file);
     let echo_stderr = File::create(echo_output_file).unwrap();
@@ -33,7 +35,7 @@ fn main() {
     loop {
         let wstest_stdout = File::create(wstest_output_file).unwrap();
         let mut wstest = Command::new("wstest")
-            .current_dir("../../autobahn")
+            .current_dir(autobahn_dir)
             .arg("-m")
             .arg("fuzzingclient")
             .stdout(Stdio::from(wstest_stdout))
@@ -55,11 +57,9 @@ fn main() {
     if !exists_in_file(wstest_output_file, "Running test case ID") {
         bail!("wstest failed");
     }
-
     echo.kill().unwrap();
 
-    let report_file = "../../autobahn/reports/server/index.json";
-    show_result(report_file);
+    show_result(&report_file);
 }
 
 fn exists_in_file(file: &str, pattern: &str) -> bool {

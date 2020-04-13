@@ -20,7 +20,7 @@ slog-term = "2.5.0"
 slog-async = "2.5.0"
 slog-stdlog = "4.0.0"
 failure = "0.1.7"
-structopt = "0.3.12"
+structopt = "0.3.13"
 rand = "0.7.3"
 url = "2.1.1"
 serde = { version = "1.0.106", features = ["derive"] }

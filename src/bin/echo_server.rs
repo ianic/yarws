@@ -28,7 +28,7 @@ async fn main() {
     let args = Args::from_args();
     let log = yarws::log::config();
 
-    match yarws::Server::bind(args.addr(), log.clone()).await {
+    match yarws::Server::bind(&args.addr(), log.clone()).await {
         Ok(srv) => {
             let mut socket = srv.listen().await;
             while let Some(socket) = socket.recv().await {

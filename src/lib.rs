@@ -54,7 +54,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn bind(addr: String, log: Logger) -> Result<Self, io::Error> {
+    pub async fn bind(addr: &str, log: Logger) -> Result<Self, Error> {
         let listener = TcpListener::bind(addr).await?;
         Ok(Self {
             log: log,
@@ -103,6 +103,15 @@ pub enum Msg {
     Binary(Vec<u8>),
     Text(String),
     //Close,
+}
+
+impl Msg {
+    pub fn clone(&self) -> Msg {
+        match self {
+            Msg::Binary(v) => Msg::Binary(v.clone()),
+            Msg::Text(v) => Msg::Text(v.clone()),
+        }
+    }
 }
 
 #[derive(Fail, Debug)]

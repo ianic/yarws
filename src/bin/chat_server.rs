@@ -3,7 +3,7 @@ use tokio;
 use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use yarws::{Error, Msg, Server};
+use yarws::{Error, Msg, Server, Socket};
 
 #[macro_use]
 extern crate slog;
@@ -44,44 +44,67 @@ async fn main() {
 async fn run(addr: &str, log: slog::Logger) -> Result<(), Error> {
     let srv = Server::bind(addr, log.clone()).await?;
     let mut socket = srv.listen().await;
+    let chat_tx = chat().await;
+    let mut client_id: u64 = 0;
 
-    let (mut sub_tx, room_tx) = chat().await;
     while let Some(socket) = socket.recv().await {
-        if let Err(_e) = sub_tx.send(socket.tx).await {
-            break;
-        }
-        client(room_tx.clone(), socket.rx).await;
+        client_id += 1;
+        client(client_id, socket, chat_tx.clone()).await;
     }
 
     Ok(())
 }
 
-async fn client(mut room_tx: Sender<Msg>, mut socket_rx: Receiver<Msg>) {
+async fn client(client_id: u64, socket: Socket, mut chat_tx: Sender<Subscription>) {
+    let mut rx = socket.rx;
+
+    let sub = Subscription::Subscribe(Subscriber {
+        client_id: client_id,
+        tx: socket.tx,
+    });
+    if let Err(_e) = chat_tx.send(sub).await {
+        return;
+    }
+
     spawn(async move {
-        while let Some(m) = socket_rx.recv().await {
-            if let Err(_e) = room_tx.send(m).await {
-                return;
+        while let Some(m) = rx.recv().await {
+            match m {
+                Msg::Text(text) => {
+                    let msg = format!("{} {}", client_id, text);
+                    if let Err(_e) = chat_tx.send(Subscription::Post(msg)).await {
+                        break;
+                    }
+                }
+                _ => (),
             }
         }
+        chat_tx
+            .send(Subscription::Unsubscribe(client_id))
+            .await
+            .unwrap_or_default();
     });
 }
 
-// async fn echo(mut rx: Receiver<Msg>, mut tx: Sender<Msg>) -> Result<(), Error> {
-//     while let Some(m) = rx.recv().await {
-//         tx.send(m).await?;
-//     }
-//     Ok(())
-// }
+struct Subscriber {
+    client_id: u64,
+    tx: Sender<Msg>,
+}
 
-async fn chat() -> (Sender<Sender<Msg>>, Sender<Msg>) {
+enum Subscription {
+    Subscribe(Subscriber),
+    Post(String),
+    Unsubscribe(u64),
+}
+
+async fn chat() -> Sender<Subscription> {
     // room
-    let (room_tx, mut room_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
-    let (mut broker_tx, mut broker_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
-    let (sub_tx, mut sub_rx): (Sender<Sender<Msg>>, Receiver<Sender<Msg>>) = mpsc::channel(16);
+    let (mut room_tx, mut room_rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
+    let (mut broker_tx, mut broker_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+    let (sub_tx, mut sub_rx): (Sender<Subscription>, Receiver<Subscription>) = mpsc::channel(1);
 
     spawn(async move {
-        while let Some(m) = room_rx.recv().await {
-            if let Err(_e) = broker_tx.send(m).await {
+        while let Some(text) = room_rx.recv().await {
+            if let Err(_e) = broker_tx.send(Msg::Text(text)).await {
                 return;
             }
         }
@@ -89,21 +112,36 @@ async fn chat() -> (Sender<Sender<Msg>>, Sender<Msg>) {
 
     // broker
     spawn(async move {
-        let mut subscribers: Vec<Sender<Msg>> = Vec::new();
+        let mut subscribers: Vec<Subscriber> = Vec::new();
         loop {
             tokio::select! {
              Some(sub) = sub_rx.recv() => {  // new subscriber
-               subscribers.push(sub);
+                match sub {
+                    Subscription::Subscribe(s) => subscribers.push(s),
+                    Subscription::Unsubscribe(client_id) => {
+                        for (idx, sub) in subscribers.iter().enumerate() {
+                            if sub.client_id == client_id {
+                                subscribers.remove(idx);
+                                break;
+                            }
+                        }
+                    }
+                    Subscription::Post(text) => {
+                        room_tx.send(text).await.unwrap_or_default();
+                    }
+                }
              },
             Some(msg) = broker_rx.recv() => {  // new message from the chat room, fan it out to all subscribers
                let mut gone: Vec<usize> = Vec::new();
                for (idx, sub) in subscribers.iter_mut().enumerate() {
-                   if let Err(_e) = sub.send(msg.clone()).await { // todo: try write maybe?
+                   if let Err(e) = sub.tx.send(msg.clone()).await { // todo: try write maybe?
+                        println!("gone error {}", e);
                        gone.push(idx);
                    }
                }
               gone.reverse();
                for idx in gone {
+                   println!("removing subscriber {}", idx);
                    subscribers.remove(idx);
                }
               },
@@ -114,7 +152,7 @@ async fn chat() -> (Sender<Sender<Msg>>, Sender<Msg>) {
         }
     });
 
-    (sub_tx, room_tx)
+    sub_tx
 }
 
 /*
@@ -122,22 +160,23 @@ async fn chat() -> (Sender<Sender<Msg>>, Sender<Msg>) {
 
 var socket = new WebSocket('ws://127.0.0.1:9001');
 var msgNo = 0;
-var clientId = new Date().getTime();
+var interval;
 socket.addEventListener('open', function (event) {
     console.log('open');
-    socket.send("new client: " + clientId);
-    setInterval(function() {
+    socket.send("new client");
+    interval = setInterval(function() {
         msgNo++;
-        socket.send("client: " + clientId + " message: " + msgNo);
+        socket.send("message: " + msgNo);
     }, 1000);
 });
 socket.addEventListener('message', function (event) {
     console.log('chat', event.data);
 });
 socket.addEventListener('close', function (event) {
-    console.log('ws closed');
+    console.log('closed');
+    clearInterval(interval);
 });
-socket.addEventListener('error', function (event) {
-  console.log('ws error: ', event);
-});
+
+
+
 */

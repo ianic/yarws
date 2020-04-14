@@ -29,7 +29,7 @@ pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Send
     let (reader_tx, socket_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
     let (socket_tx, writer_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
 
-    let control_tx = Writer::new(stream_tx, writer_rx, mask_frames, log.clone()).spawn();
+    let control_tx = Writer::new(stream_tx, writer_rx, socket_tx.clone(), mask_frames, log.clone()).spawn();
 
     Reader::new(deflate_supported, mask_frames, stream_rx, control_tx, reader_tx, log).spawn();
 
@@ -40,15 +40,23 @@ pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Send
 struct Writer {
     stream_tx: WriteHalf<TcpStream>,
     writer_rx: Receiver<Msg>,
+    writer_tx: Sender<Msg>,
     mask_frames: bool,
     log: Logger,
 }
 
 impl Writer {
-    fn new(stream_tx: WriteHalf<TcpStream>, writer_rx: Receiver<Msg>, mask_frames: bool, log: Logger) -> Self {
+    fn new(
+        stream_tx: WriteHalf<TcpStream>,
+        writer_rx: Receiver<Msg>,
+        writer_tx: Sender<Msg>,
+        mask_frames: bool,
+        log: Logger,
+    ) -> Self {
         Self {
             stream_tx: stream_tx,
             writer_rx: writer_rx,
+            writer_tx: writer_tx,
             mask_frames: mask_frames,
             log: log,
         }
@@ -59,16 +67,27 @@ impl Writer {
         let control_tx = raw_tx.clone();
 
         // out loop writes raw data to the tcp stream
-        Writer::out_loop(raw_rx, self.stream_tx, self.log.clone());
+        Writer::out_loop(raw_rx, self.stream_tx, self.writer_tx, self.log.clone());
         // inner loop transforms Msg from upstream application to the raw data
         Writer::inner_loop(self.writer_rx, raw_tx, self.mask_frames, self.log);
 
         control_tx // reader controll messages are passed to the out loop through this channel
     }
 
-    fn out_loop(mut raw_rx: Receiver<Vec<u8>>, mut stream_tx: WriteHalf<TcpStream>, log: Logger) {
+    fn out_loop(
+        mut raw_rx: Receiver<Vec<u8>>,
+        mut stream_tx: WriteHalf<TcpStream>,
+        mut writer_tx: Sender<Msg>,
+        log: Logger,
+    ) {
         spawn(async move {
             while let Some(v) = raw_rx.recv().await {
+                // signal that read part of the stream is closed
+                if v.len() == 0 {
+                    writer_tx.send(Msg::Close).await.unwrap_or_default();
+                    //trace!(log, "exit out loop");
+                    break;
+                }
                 if let Err(e) = stream_tx.write(&v).await {
                     error!(log, "{}", e);
                     break;
@@ -80,9 +99,17 @@ impl Writer {
     fn inner_loop(mut writer_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, mask_frames: bool, log: Logger) {
         spawn(async move {
             while let Some(m) = writer_rx.recv().await {
-                if let Err(e) = raw_tx.send(m.as_raw(mask_frames)).await {
-                    error!(log, "{}", e);
-                    break;
+                match m {
+                    Msg::Close => {
+                        //trace!(log, "exit inner loop");
+                        break;
+                    }
+                    _ => {
+                        if let Err(e) = raw_tx.send(m.as_raw(mask_frames)).await {
+                            error!(log, "{}", e);
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -95,6 +122,7 @@ impl Msg {
         match self {
             Msg::Binary(b) => w.binary(b.to_vec()),
             Msg::Text(t) => w.text(t.to_string()),
+            Msg::Close => Vec::new(), // or panic this can't happen
         }
     }
 }
@@ -134,6 +162,7 @@ impl Reader {
             if let Err(e) = self.read().await {
                 error!(self.log, "{}", e);
             }
+            self.control_tx.send(Vec::new()).await.unwrap_or_default(); // signal close to the writer loop
         });
     }
 
@@ -192,7 +221,7 @@ impl Reader {
                 break;
             }
         }
-        trace!(self.log, "read half closed");
+        //trace!(self.log, "read half closed");
         Ok(())
     }
 

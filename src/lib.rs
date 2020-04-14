@@ -38,6 +38,7 @@ impl Socket {
         match self.rx.recv().await {
             None => Ok(None),
             Some(m) => match m {
+                Msg::Close => Ok(None),
                 Msg::Text(t) => Ok(Some(t)),
                 Msg::Binary(buf) => match str::from_utf8(&buf) {
                     Ok(s) => Ok(Some(s.to_owned())),
@@ -102,7 +103,7 @@ async fn handle_stream(stream: TcpStream, no: usize, mut sockets_tx: Sender<Sock
 pub enum Msg {
     Binary(Vec<u8>),
     Text(String),
-    //Close,
+    Close,
 }
 
 impl Msg {
@@ -110,6 +111,7 @@ impl Msg {
         match self {
             Msg::Binary(v) => Msg::Binary(v.clone()),
             Msg::Text(v) => Msg::Text(v.clone()),
+            Msg::Close => Msg::Close,
         }
     }
 }

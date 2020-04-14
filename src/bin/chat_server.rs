@@ -134,14 +134,12 @@ async fn chat() -> Sender<Subscription> {
             Some(msg) = broker_rx.recv() => {  // new message from the chat room, fan it out to all subscribers
                let mut gone: Vec<usize> = Vec::new();
                for (idx, sub) in subscribers.iter_mut().enumerate() {
-                   if let Err(e) = sub.tx.send(msg.clone()).await { // todo: try write maybe?
-                        println!("gone error {}", e);
+                   if let Err(_e) = sub.tx.send(msg.clone()).await { // todo: try write maybe?
                        gone.push(idx);
                    }
                }
               gone.reverse();
                for idx in gone {
-                   println!("removing subscriber {}", idx);
                    subscribers.remove(idx);
                }
               },

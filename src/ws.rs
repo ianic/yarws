@@ -26,8 +26,8 @@ pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Send
     // socket is websocet implementation passed downstream
     // Writer is writing to the outbound tcp stream
     let (stream_rx, stream_tx) = io::split(upgrade.stream);
-    let (reader_tx, socket_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
-    let (socket_tx, writer_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+    let (reader_tx, socket_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+    let (socket_tx, writer_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
 
     let control_tx = Writer::new(stream_tx, writer_rx, socket_tx.clone(), mask_frames, log.clone()).spawn();
 
@@ -63,7 +63,7 @@ impl Writer {
     }
 
     fn spawn(self) -> Sender<Vec<u8>> {
-        let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(16);
+        let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1);
         let control_tx = raw_tx.clone();
 
         // out loop writes raw data to the tcp stream

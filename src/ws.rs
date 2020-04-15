@@ -40,17 +40,14 @@ impl Writer {
         let (tx, mut rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
         spawn(async move {
             while let Some(m) = rx.recv().await {
-                match m {
-                    Msg::Close(_) => {
-                        break;
-                    }
-                    _ => {
-                        let raw = m.as_raw(mask_frames);
-                        if let Err(e) = stream_tx.write(&raw).await {
-                            error!(log, "{}", e);
-                            break;
-                        }
-                    }
+                let close = m.is_close();
+                let raw = m.as_raw(mask_frames);
+                if let Err(e) = stream_tx.write(&raw).await {
+                    error!(log, "{}", e);
+                    break;
+                }
+                if close {
+                    break;
                 }
             }
             trace!(log, "writer loop closed");
@@ -71,13 +68,27 @@ impl Msg {
             Msg::Pong(payload) => w.pong(payload),
         }
     }
+
+    fn is_close(&self) -> bool {
+        match self {
+            Msg::Close(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_data(&self) -> bool {
+        match self {
+            Msg::Binary(_) | Msg::Text(_) => true,
+            _ => false,
+        }
+    }
 }
 
 struct Reader {
     deflate_supported: bool,
     stream_rx: ReadHalf<TcpStream>,
     control_tx: Sender<Msg>,
-    reader_tx: Sender<Msg>,
+    tx: Sender<Msg>,
     log: slog::Logger,
     header_buf: [u8; 14],
 }
@@ -93,8 +104,8 @@ impl Reader {
         let mut reader = Reader {
             deflate_supported: deflate_supported,
             stream_rx: stream_rx,
-            reader_tx: tx,
-            control_tx: control_tx,
+            tx: tx,                 // otuput of the messages to the application
+            control_tx: control_tx, // signal for the write loop that reader is closed
             log: log,
             header_buf: [0u8; 14],
         };
@@ -136,13 +147,17 @@ impl Reader {
 
     async fn read(&mut self) -> Result<(), Error> {
         let mut fragment: Option<Frame> = None;
-        loop {
+        let status = loop {
+            // read frame from tcp connection
             let mut frame = match self.read_header().await? {
                 Some(f) => f,
-                None => break,
+                None => {
+                    break 0;
+                }
             };
             self.read_payload(&mut frame).await?;
 
+            // validate frame, if it is fragment wait for more
             frame.validate(self.deflate_supported, fragment.is_some())?;
             if frame.is_fragment() {
                 trace!(self.log, "fragment" ;"opcode" =>  frame.opcode.desc(), "len" => frame.payload_len);
@@ -155,30 +170,18 @@ impl Reader {
             }
             frame.validate_payload()?;
 
+            // process message
             trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len, "header_len" => frame.header_len, "mask" => frame.mask);
-            if self.handle_frame(frame).await? {
-                break;
+            match frame.opcode.value() {
+                TEXT | BINARY => self.tx.send(frame.to_msg()).await?,
+                PING => self.control_tx.send(frame.to_pong()).await?,
+                CLOSE => break frame.status(),
+                PONG | _ => (),
             }
-        }
+        };
+        self.control_tx.send(Msg::Close(status)).await.unwrap_or_default();
         trace!(self.log, "reader loop closed");
         Ok(())
-    }
-
-    async fn handle_frame(&mut self, frame: Frame) -> Result<bool, Error> {
-        match frame.opcode.value() {
-            TEXT | BINARY => self.reader_tx.send(frame.to_msg()).await?,
-            CLOSE => {
-                let msg = frame.to_msg();
-                self.reader_tx.send(msg.clone()).await?;
-                self.control_tx.send(msg).await?;
-                return Ok(true);
-            }
-            PING => {
-                self.control_tx.send(frame.to_msg()).await?;
-            }
-            PONG | _ => (),
-        }
-        Ok(false)
     }
 }
 
@@ -444,6 +447,10 @@ impl Frame {
             _ => Msg::Close(0),
         }
     }
+
+    fn to_pong(self) -> Msg {
+        Msg::Pong(self.payload)
+    }
 }
 
 //Converts masked data into unmasked data, or vice versa.
@@ -476,7 +483,11 @@ impl FrameWriter {
     }
 
     fn close(&self, status: u16) -> Vec<u8> {
-        self.build(CLOSE, status.to_be_bytes().to_vec())
+        if status == 0 {
+            self.build(CLOSE, Vec::new())
+        } else {
+            self.build(CLOSE, status.to_be_bytes().to_vec())
+        }
     }
 
     fn binary(&self, payload: Vec<u8>) -> Vec<u8> {

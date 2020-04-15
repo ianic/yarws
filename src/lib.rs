@@ -55,16 +55,18 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn bind(addr: &str, log: Logger) -> Result<Self, Error> {
+    pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<Receiver<Socket>, Error> {
+        let log = log.into().unwrap_or(log::null());
         let listener = TcpListener::bind(addr).await?;
-        Ok(Self {
+        let srv = Server {
             log: log,
             listener: listener,
-        })
+        };
+        Ok(srv.listen().await)
     }
 
-    pub async fn listen(mut self) -> Receiver<Socket> {
-        let (socket_tx, socket_rx): (Sender<Socket>, Receiver<Socket>) = mpsc::channel(16);
+    async fn listen(mut self) -> Receiver<Socket> {
+        let (socket_tx, socket_rx): (Sender<Socket>, Receiver<Socket>) = mpsc::channel(1);
 
         let mut conn_no = 0;
         spawn(async move {
@@ -162,7 +164,6 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
-//pub async fn connect(url: &str, log: Logger) -> Result<Socket, Error> {
 pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
     let log = log.into().unwrap_or(log::null());
     let (addr, path) = parse_url(url)?;

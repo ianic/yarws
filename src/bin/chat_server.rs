@@ -42,24 +42,22 @@ async fn main() {
 }
 
 async fn run(addr: &str, log: slog::Logger) -> Result<(), Error> {
-    let srv = Server::bind(addr, log.clone()).await?;
-    let mut socket = srv.listen().await;
+    let mut srv_rx = Server::bind(addr, log.clone()).await?;
     let chat_tx = chat().await;
-    let mut client_id: u64 = 0;
 
-    while let Some(socket) = socket.recv().await {
-        client_id += 1;
-        client(client_id, socket, chat_tx.clone()).await;
+    while let Some(socket) = srv_rx.recv().await {
+        client(socket, chat_tx.clone()).await;
     }
 
     Ok(())
 }
 
-async fn client(client_id: u64, socket: Socket, mut chat_tx: Sender<Subscription>) {
+async fn client(socket: Socket, mut chat_tx: Sender<Subscription>) {
     let mut rx = socket.rx;
+    let client_id = socket.no;
 
     let sub = Subscription::Subscribe(Subscriber {
-        client_id: client_id,
+        client_id: socket.no,
         tx: socket.tx,
     });
     if let Err(_e) = chat_tx.send(sub).await {
@@ -86,14 +84,14 @@ async fn client(client_id: u64, socket: Socket, mut chat_tx: Sender<Subscription
 }
 
 struct Subscriber {
-    client_id: u64,
+    client_id: usize,
     tx: Sender<Msg>,
 }
 
 enum Subscription {
     Subscribe(Subscriber),
     Post(String),
-    Unsubscribe(u64),
+    Unsubscribe(usize),
 }
 
 async fn chat() -> Sender<Subscription> {

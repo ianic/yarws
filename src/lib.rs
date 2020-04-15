@@ -38,12 +38,12 @@ impl Socket {
         match self.rx.recv().await {
             None => Ok(None),
             Some(m) => match m {
-                Msg::Close => Ok(None),
                 Msg::Text(t) => Ok(Some(t)),
                 Msg::Binary(buf) => match str::from_utf8(&buf) {
                     Ok(s) => Ok(Some(s.to_owned())),
                     Err(e) => return Err(Error::TextPayloadNotValidUTF8(e)),
                 },
+                _ => Ok(None),
             },
         }
     }
@@ -103,15 +103,19 @@ async fn handle_stream(stream: TcpStream, no: usize, mut sockets_tx: Sender<Sock
 pub enum Msg {
     Binary(Vec<u8>),
     Text(String),
-    Close,
+    Close(u16),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
 }
 
 impl Msg {
     pub fn clone(&self) -> Msg {
         match self {
-            Msg::Binary(v) => Msg::Binary(v.clone()),
-            Msg::Text(v) => Msg::Text(v.clone()),
-            Msg::Close => Msg::Close,
+            Msg::Text(text) => Msg::Text(text.clone()),
+            Msg::Binary(payload) => Msg::Binary(payload.clone()),
+            Msg::Close(status) => Msg::Close(*status),
+            Msg::Ping(payload) => Msg::Ping(payload.clone()),
+            Msg::Pong(payload) => Msg::Pong(payload.clone()),
         }
     }
 }
@@ -190,13 +194,6 @@ fn parse_url(u: &str) -> Result<(String, String), Error> {
     };
     Ok((addr, path))
 }
-
-/*
-TODOs
-- clean exit
-- how to use logger into library
-- znamo samo primati komprimirane poruke, ne i komprimirati
-*/
 
 #[cfg(test)]
 mod tests {

@@ -26,144 +26,85 @@ pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Send
     // socket is websocet implementation passed downstream
     // Writer is writing to the outbound tcp stream
     let (stream_rx, stream_tx) = io::split(upgrade.stream);
-    let (reader_tx, socket_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
-    let (socket_tx, writer_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+    let writer_tx = Writer::spawn(stream_tx, mask_frames, log.clone());
+    let socket_rx = Reader::spawn(stream_rx, writer_tx.clone(), deflate_supported, log);
 
-    let control_tx = Writer::new(stream_tx, writer_rx, socket_tx.clone(), mask_frames, log.clone()).spawn();
-
-    Reader::new(deflate_supported, mask_frames, stream_rx, control_tx, reader_tx, log).spawn();
-
-    (socket_rx, socket_tx)
+    (socket_rx, writer_tx)
 }
 
 // Writer writes raw data to the outbound tcp stream
-struct Writer {
-    stream_tx: WriteHalf<TcpStream>,
-    writer_rx: Receiver<Msg>,
-    writer_tx: Sender<Msg>,
-    mask_frames: bool,
-    log: Logger,
-}
+struct Writer {}
 
 impl Writer {
-    fn new(
-        stream_tx: WriteHalf<TcpStream>,
-        writer_rx: Receiver<Msg>,
-        writer_tx: Sender<Msg>,
-        mask_frames: bool,
-        log: Logger,
-    ) -> Self {
-        Self {
-            stream_tx: stream_tx,
-            writer_rx: writer_rx,
-            writer_tx: writer_tx,
-            mask_frames: mask_frames,
-            log: log,
-        }
-    }
-
-    fn spawn(self) -> Sender<Vec<u8>> {
-        let (raw_tx, raw_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1);
-        let control_tx = raw_tx.clone();
-
-        // out loop writes raw data to the tcp stream
-        Writer::out_loop(raw_rx, self.stream_tx, self.writer_tx, self.log.clone());
-        // inner loop transforms Msg from upstream application to the raw data
-        Writer::inner_loop(self.writer_rx, raw_tx, self.mask_frames, self.log);
-
-        control_tx // reader controll messages are passed to the out loop through this channel
-    }
-
-    fn out_loop(
-        mut raw_rx: Receiver<Vec<u8>>,
-        mut stream_tx: WriteHalf<TcpStream>,
-        mut writer_tx: Sender<Msg>,
-        log: Logger,
-    ) {
+    fn spawn(mut stream_tx: WriteHalf<TcpStream>, mask_frames: bool, log: Logger) -> Sender<Msg> {
+        let (tx, mut rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
         spawn(async move {
-            while let Some(v) = raw_rx.recv().await {
-                // signal that read part of the stream is closed
-                if v.len() == 0 {
-                    writer_tx.send(Msg::Close).await.unwrap_or_default();
-                    //trace!(log, "exit out loop");
-                    break;
-                }
-                if let Err(e) = stream_tx.write(&v).await {
-                    error!(log, "{}", e);
-                    break;
-                }
-            }
-        });
-    }
-
-    fn inner_loop(mut writer_rx: Receiver<Msg>, mut raw_tx: Sender<Vec<u8>>, mask_frames: bool, log: Logger) {
-        spawn(async move {
-            while let Some(m) = writer_rx.recv().await {
+            while let Some(m) = rx.recv().await {
                 match m {
-                    Msg::Close => {
-                        //trace!(log, "exit inner loop");
+                    Msg::Close(_) => {
                         break;
                     }
                     _ => {
-                        if let Err(e) = raw_tx.send(m.as_raw(mask_frames)).await {
+                        let raw = m.as_raw(mask_frames);
+                        if let Err(e) = stream_tx.write(&raw).await {
                             error!(log, "{}", e);
                             break;
                         }
                     }
                 }
             }
+            trace!(log, "writer loop closed");
         });
+
+        tx
     }
 }
 
 impl Msg {
-    fn as_raw(&self, client: bool) -> Vec<u8> {
+    fn as_raw(self, client: bool) -> Vec<u8> {
         let w = FrameWriter::new(client);
         match self {
-            Msg::Binary(b) => w.binary(b.to_vec()),
-            Msg::Text(t) => w.text(t.to_string()),
-            Msg::Close => Vec::new(), // or panic this can't happen
+            Msg::Binary(payload) => w.binary(payload),
+            Msg::Text(text) => w.text(text),
+            Msg::Close(status) => w.close(status),
+            Msg::Ping(payload) => w.ping(payload),
+            Msg::Pong(payload) => w.pong(payload),
         }
     }
 }
 
 struct Reader {
     deflate_supported: bool,
-    mask_frames: bool,
     stream_rx: ReadHalf<TcpStream>,
-    control_tx: Sender<Vec<u8>>,
+    control_tx: Sender<Msg>,
     reader_tx: Sender<Msg>,
     log: slog::Logger,
     header_buf: [u8; 14],
 }
 
 impl Reader {
-    fn new(
-        deflate_supported: bool,
-        mask_frames: bool,
+    fn spawn(
         stream_rx: ReadHalf<TcpStream>,
-        control_tx: Sender<Vec<u8>>,
-        reader_tx: Sender<Msg>,
+        control_tx: Sender<Msg>,
+        deflate_supported: bool,
         log: slog::Logger,
-    ) -> Reader {
-        Reader {
+    ) -> Receiver<Msg> {
+        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+        let mut reader = Reader {
             deflate_supported: deflate_supported,
-            mask_frames: mask_frames,
             stream_rx: stream_rx,
+            reader_tx: tx,
             control_tx: control_tx,
-            reader_tx: reader_tx,
             log: log,
             header_buf: [0u8; 14],
-        }
-    }
+        };
 
-    fn spawn(mut self) {
         spawn(async move {
-            if let Err(e) = self.read().await {
-                error!(self.log, "{}", e);
+            if let Err(e) = reader.read().await {
+                error!(reader.log, "{}", e);
             }
-            self.control_tx.send(Vec::new()).await.unwrap_or_default(); // signal close to the writer loop
         });
+        return rx;
     }
 
     async fn read_payload(&mut self, frame: &mut Frame) -> Result<(), Error> {
@@ -215,24 +156,29 @@ impl Reader {
             frame.validate_payload()?;
 
             trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len, "header_len" => frame.header_len, "mask" => frame.mask);
-            let is_close = frame.is_close();
-            self.handle_frame(frame).await?;
-            if is_close {
+            if self.handle_frame(frame).await? {
                 break;
             }
         }
-        //trace!(self.log, "read half closed");
+        trace!(self.log, "reader loop closed");
         Ok(())
     }
 
-    async fn handle_frame(&mut self, frame: Frame) -> Result<(), Error> {
+    async fn handle_frame(&mut self, frame: Frame) -> Result<bool, Error> {
         match frame.opcode.value() {
             TEXT | BINARY => self.reader_tx.send(frame.to_msg()).await?,
-            CLOSE => self.control_tx.send(frame.to_close(self.mask_frames)).await?,
-            PING => self.control_tx.send(frame.to_pong(self.mask_frames)).await?,
+            CLOSE => {
+                let msg = frame.to_msg();
+                self.reader_tx.send(msg.clone()).await?;
+                self.control_tx.send(msg).await?;
+                return Ok(true);
+            }
+            PING => {
+                self.control_tx.send(frame.to_msg()).await?;
+            }
             PONG | _ => (),
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -284,9 +230,11 @@ impl Opcode {
     fn text(&self) -> bool {
         self.0 == TEXT
     }
+    #[allow(dead_code)]
     fn binary(&self) -> bool {
         self.0 == BINARY
     }
+    #[allow(dead_code)]
     fn close(&self) -> bool {
         self.0 == CLOSE
     }
@@ -468,29 +416,16 @@ impl Frame {
         }
     }
 
-    fn is_close(&self) -> bool {
-        self.opcode.close()
-    }
-
-    fn to_pong(self, mask_frames: bool) -> Vec<u8> {
-        FrameWriter::new(mask_frames).pong(self.payload)
-        //FrameWriter::control(PONG, self.payload)
-    }
-
-    fn to_close(self, mask_frames: bool) -> Vec<u8> {
-        let mut payload: Vec<u8> = Vec::new();
-        if self.payload_len == 2 {
-            let bytes: [u8; 2] = [self.payload[0], self.payload[1]];
-            let status = u16::from_be_bytes(bytes);
-            let status = match status {
-                1000 | 1001 | 1002 | 1003 | 1007 | 1008 | 1009 | 1010 | 1011 => status, // valid status code, reply with that code
-                _ => 0, // for all other reply with close frame without payload
-            };
-            if status > 0 {
-                payload.extend_from_slice(&status.to_be_bytes());
-            }
+    fn status(&self) -> u16 {
+        if self.payload_len != 2 {
+            return 0;
         }
-        FrameWriter::new(mask_frames).close(payload)
+        let bytes: [u8; 2] = [self.payload[0], self.payload[1]];
+        let status = u16::from_be_bytes(bytes);
+        match status {
+            1000 | 1001 | 1002 | 1003 | 1007 | 1008 | 1009 | 1010 | 1011 => status, // valid status code, reply with that code
+            _ => 0, // for all other reply with close frame without payload
+        }
     }
 
     fn append(&mut self, other: &Frame) -> &Frame {
@@ -500,10 +435,14 @@ impl Frame {
     }
 
     fn to_msg(self) -> Msg {
-        if self.opcode.binary() {
-            return Msg::Binary(self.payload);
+        match self.opcode.value() {
+            TEXT => Msg::Text(self.text_payload),
+            BINARY => Msg::Binary(self.payload),
+            PING => Msg::Ping(self.payload),
+            PONG => Msg::Pong(self.payload),
+            CLOSE => Msg::Close(self.status()),
+            _ => Msg::Close(0),
         }
-        Msg::Text(self.text_payload)
     }
 }
 
@@ -528,12 +467,16 @@ impl FrameWriter {
         Self { mask: mask }
     }
 
+    fn ping(&self, payload: Vec<u8>) -> Vec<u8> {
+        self.build(PING, payload)
+    }
+
     fn pong(&self, payload: Vec<u8>) -> Vec<u8> {
         self.build(PONG, payload)
     }
 
-    fn close(&self, payload: Vec<u8>) -> Vec<u8> {
-        self.build(CLOSE, payload)
+    fn close(&self, status: u16) -> Vec<u8> {
+        self.build(CLOSE, status.to_be_bytes().to_vec())
     }
 
     fn binary(&self, payload: Vec<u8>) -> Vec<u8> {

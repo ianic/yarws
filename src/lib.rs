@@ -35,7 +35,7 @@ impl Socket {
             match self.rx.recv().await {
                 None => return None, // channel exhausted
                 Some(m) => {
-                    let opt_msg = m.as_msg();
+                    let opt_msg = m.into_msg();
                     match opt_msg {
                         None => continue, // skip control message type
                         _ => return opt_msg,
@@ -65,7 +65,7 @@ impl Socket {
     }
 
     pub async fn send(&mut self, msg: Msg) -> Result<(), Error> {
-        self.tx.send(msg.as_ws_msg()).await?;
+        self.tx.send(msg.into_ws_msg()).await?;
         Ok(())
     }
 
@@ -81,7 +81,7 @@ impl Socket {
         let mut ws_rx = self.rx;
         spawn(async move {
             while let Some(ws_msg) = ws_rx.recv().await {
-                if let Some(msg) = ws_msg.as_msg() {
+                if let Some(msg) = ws_msg.into_msg() {
                     match msg {
                         Msg::Text(text) => {
                             if let Err(_) = i_tx.send(text).await {
@@ -113,7 +113,7 @@ pub enum Msg {
 }
 
 impl Msg {
-    fn as_ws_msg(self) -> ws::Msg {
+    fn into_ws_msg(self) -> ws::Msg {
         match self {
             Msg::Text(text) => ws::Msg::Text(text),
             Msg::Binary(vec) => ws::Msg::Binary(vec),

@@ -33,7 +33,7 @@ impl Msg {
         }
     }
 
-    pub fn as_msg(self) -> Option<super::Msg> {
+    pub fn into_msg(self) -> Option<super::Msg> {
         match self {
             Msg::Text(text) => Some(super::Msg::Text(text)),
             Msg::Binary(payload) => Some(super::Msg::Binary(payload)),
@@ -41,7 +41,7 @@ impl Msg {
         }
     }
 
-    fn as_raw(self, client: bool) -> Vec<u8> {
+    fn into_raw(self, client: bool) -> Vec<u8> {
         let w = FrameWriter::new(client);
         match self {
             Msg::Binary(payload) => w.binary(payload),
@@ -55,13 +55,6 @@ impl Msg {
     fn is_close(&self) -> bool {
         match self {
             Msg::Close(_) => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_data(&self) -> bool {
-        match self {
-            Msg::Binary(_) | Msg::Text(_) => true,
             _ => false,
         }
     }
@@ -95,7 +88,7 @@ impl Writer {
         spawn(async move {
             while let Some(m) = rx.recv().await {
                 let close = m.is_close();
-                let raw = m.as_raw(mask_frames);
+                let raw = m.into_raw(mask_frames);
                 if let Err(e) = stream_tx.write(&raw).await {
                     error!(log, "{}", e);
                     break;
@@ -188,7 +181,7 @@ impl Reader {
             frame.validate(self.deflate_supported, fragment.is_some())?;
             if frame.is_fragment() {
                 trace!(self.log, "fragment" ;"opcode" =>  frame.opcode.desc(), "len" => frame.payload_len);
-                let (new_frame, new_fragment) = frame.to_fragment(fragment);
+                let (new_frame, new_fragment) = frame.into_fragment(fragment);
                 fragment = new_fragment;
                 match new_frame {
                     Some(f) => frame = f,
@@ -200,7 +193,7 @@ impl Reader {
             // process message
             trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len, "header_len" => frame.header_len, "mask" => frame.mask);
             match frame.opcode.value() {
-                TEXT | BINARY => self.tx.send(frame.to_msg()).await?,
+                TEXT | BINARY => self.tx.send(frame.into_ws_msg()).await?,
                 PING => self.control_tx.send(frame.to_pong()).await?,
                 CLOSE => break frame.status(),
                 PONG | _ => (),
@@ -429,7 +422,7 @@ impl Frame {
     // if frame is part of the fragmented message it is appended to the current fragment
     // returns frame, and fragment
     // if frame is None it is not completed
-    fn to_fragment(self, fragment: Option<Frame>) -> (Option<Frame>, Option<Frame>) {
+    fn into_fragment(self, fragment: Option<Frame>) -> (Option<Frame>, Option<Frame>) {
         match self.fragment() {
             Fragment::Start => (None, Some(self)),
             Fragment::Middle => {
@@ -464,7 +457,7 @@ impl Frame {
         self
     }
 
-    fn to_msg(self) -> Msg {
+    fn into_ws_msg(self) -> Msg {
         match self.opcode.value() {
             TEXT => Msg::Text(self.text_payload),
             BINARY => Msg::Binary(self.payload),

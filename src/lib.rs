@@ -30,20 +30,61 @@ pub struct Socket {
 }
 
 impl Socket {
-    pub async fn send(&mut self, text: &str) -> Result<(), Error> {
-        self.tx.send(Msg::Text(text.to_owned())).await?;
+    pub async fn recv(&mut self) -> Option<Message> {
+        loop {
+            match self.rx.recv().await {
+                None => return None, // channel exhausted
+                Some(m) => {
+                    let opt_msg = m.as_message();
+                    match opt_msg {
+                        None => continue, // skip control message type
+                        _ => return opt_msg,
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn recv_text(&mut self) -> Option<String> {
+        loop {
+            match self.rx.recv().await {
+                None => return None,
+                Some(m) => match m {
+                    Msg::Text(text) => return Some(text),
+                    _ => continue, // ignore other type of the messages
+                },
+            }
+        }
+    }
+
+    pub async fn must_recv_text(&mut self) -> Result<String, Error> {
+        match self.recv_text().await {
+            None => Err(Error::SocketClosed),
+            Some(v) => Ok(v),
+        }
+    }
+
+    pub async fn send(&mut self, msg: Message) -> Result<(), Error> {
+        self.tx.send(msg.as_msg()).await?;
         Ok(())
     }
 
-    pub async fn receive(&mut self) -> Result<String, Error> {
-        loop {
-            match self.rx.recv().await {
-                None => return Err(Error::SocketClosed),
-                Some(m) => match m {
-                    Msg::Text(text) => return Ok(text),
-                    _ => (), // ignore other type of the messages
-                },
-            }
+    pub async fn send_text(&mut self, text: &str) -> Result<(), Error> {
+        self.tx.send(Msg::Text(text.to_owned())).await?;
+        Ok(())
+    }
+}
+
+pub enum Message {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+impl Message {
+    fn as_msg(self) -> Msg {
+        match self {
+            Message::Text(text) => Msg::Text(text),
+            Message::Binary(vec) => Msg::Binary(vec),
         }
     }
 }
@@ -117,6 +158,14 @@ impl Msg {
             Msg::Close(status) => Msg::Close(*status),
             Msg::Ping(payload) => Msg::Ping(payload.clone()),
             Msg::Pong(payload) => Msg::Pong(payload.clone()),
+        }
+    }
+
+    pub fn as_message(self) -> Option<Message> {
+        match self {
+            Msg::Text(text) => Some(Message::Text(text)),
+            Msg::Binary(payload) => Some(Message::Binary(payload)),
+            _ => None,
         }
     }
 }

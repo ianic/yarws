@@ -58,7 +58,7 @@ async fn generate_report(root: &str, log: Logger) -> Result<(), Error> {
 async fn get_case_count(root: &str, log: Logger) -> Result<usize, Error> {
     let url = root.to_owned() + "/getCaseCount";
     let mut socket = connect(&url, log).await?;
-    let msg = socket.receive().await?;
+    let msg = socket.must_recv_text().await?;
     if let Ok(i) = msg.as_str().parse::<usize>() {
         return Ok(i);
     }

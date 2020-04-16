@@ -21,8 +21,8 @@ async fn main() -> Result<(), Error> {
         let rep = size / data.len() + 1;
         let req = &data.repeat(rep)[0..size];
 
-        socket.send(req).await?;
-        let rsp = socket.receive().await?;
+        socket.send_text(req).await?;
+        let rsp = socket.must_recv_text().await?;
         assert_eq!(req, rsp);
     }
     Ok(())

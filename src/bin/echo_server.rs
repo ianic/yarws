@@ -1,7 +1,6 @@
 use structopt::StructOpt;
 use tokio;
-use tokio::sync::mpsc::{Receiver, Sender};
-use yarws::{log, Error, Msg, Server};
+use yarws::{log, Error, Message, Server, Socket};
 
 #[macro_use]
 extern crate slog;
@@ -42,33 +41,34 @@ async fn main() {
 async fn run(args: &Args, log: slog::Logger) -> Result<(), Error> {
     let mut srv_rx = Server::bind(&args.addr(), log.clone()).await?;
     while let Some(socket) = srv_rx.recv().await {
+        let log = log.new(o!("conn" => socket.no));
         if args.reverse {
-            reverse_echo(socket.rx, socket.tx).await?;
+            reverse_echo(socket).await?;
         } else {
-            echo(socket.rx, socket.tx).await?;
+            echo(socket).await?;
         };
-        trace!(log, "socket closed"; "conn" => socket.no);
+        trace!(log, "socket closed");
     }
     Ok(())
 }
 
-async fn echo(mut rx: Receiver<Msg>, mut tx: Sender<Msg>) -> Result<(), Error> {
-    while let Some(m) = rx.recv().await {
-        tx.send(m).await?;
+async fn echo(mut socket: Socket) -> Result<(), Error> {
+    while let Some(msg) = socket.recv().await {
+        socket.send(msg).await?;
     }
     Ok(())
 }
 
-async fn reverse_echo(mut rx: Receiver<Msg>, mut tx: Sender<Msg>) -> Result<(), Error> {
-    while let Some(m) = rx.recv().await {
-        let m = match m {
-            Msg::Text(t) => {
+async fn reverse_echo(mut socket: Socket) -> Result<(), Error> {
+    while let Some(msg) = socket.recv().await {
+        let msg = match msg {
+            Message::Text(t) => {
                 let t = t.chars().rev().collect::<String>();
-                Msg::Text(t)
+                Message::Text(t)
             }
-            _ => m,
+            _ => msg,
         };
-        tx.send(m).await?;
+        socket.send(msg).await?;
     }
     Ok(())
 }

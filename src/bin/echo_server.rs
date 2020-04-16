@@ -1,6 +1,6 @@
 use structopt::StructOpt;
 use tokio;
-use yarws::{log, Error, Message, Server, Socket};
+use yarws::{log, Error, Msg, Server, Socket};
 
 #[macro_use]
 extern crate slog;
@@ -39,8 +39,8 @@ async fn main() {
 }
 
 async fn run(args: &Args, log: slog::Logger) -> Result<(), Error> {
-    let mut srv_rx = Server::bind(&args.addr(), log.clone()).await?;
-    while let Some(socket) = srv_rx.recv().await {
+    let mut srv = Server::bind(&args.addr(), log.clone()).await?;
+    while let Some(socket) = srv.accept().await {
         let log = log.new(o!("conn" => socket.no));
         if args.reverse {
             reverse_echo(socket).await?;
@@ -62,9 +62,9 @@ async fn echo(mut socket: Socket) -> Result<(), Error> {
 async fn reverse_echo(mut socket: Socket) -> Result<(), Error> {
     while let Some(msg) = socket.recv().await {
         let msg = match msg {
-            Message::Text(t) => {
+            Msg::Text(t) => {
                 let t = t.chars().rev().collect::<String>();
-                Message::Text(t)
+                Msg::Text(t)
             }
             _ => msg,
         };

@@ -42,8 +42,8 @@ async fn main() -> Result<(), Error> {
 }
 
 async fn echo(mut socket: Socket, _log: Logger) -> Result<(), Error> {
-    while let Some(msg) = socket.rx.recv().await {
-        socket.tx.send(msg).await?;
+    while let Some(msg) = socket.recv().await {
+        socket.send(msg).await?;
     }
     Ok(())
 }
@@ -51,7 +51,7 @@ async fn echo(mut socket: Socket, _log: Logger) -> Result<(), Error> {
 async fn generate_report(root: &str, log: Logger) -> Result<(), Error> {
     let url = root.to_owned() + "/updateReports?agent=yarws";
     let mut socket = connect(&url, log).await?;
-    while let Some(_msg) = socket.rx.recv().await {}
+    while let Some(_msg) = socket.recv().await {}
     Ok(())
 }
 

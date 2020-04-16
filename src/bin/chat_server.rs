@@ -3,7 +3,7 @@ use tokio;
 use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use yarws::{Error, Msg, Server, Socket};
+use yarws::{Error, Server, Socket};
 
 #[macro_use]
 extern crate slog;
@@ -42,10 +42,10 @@ async fn main() {
 }
 
 async fn run(addr: &str, log: slog::Logger) -> Result<(), Error> {
-    let mut srv_rx = Server::bind(addr, log.clone()).await?;
+    let mut srv = Server::bind(addr, log.clone()).await?;
     let chat_tx = chat().await;
 
-    while let Some(socket) = srv_rx.recv().await {
+    while let Some(socket) = srv.accept().await {
         client(socket, chat_tx.clone()).await;
     }
 
@@ -53,27 +53,22 @@ async fn run(addr: &str, log: slog::Logger) -> Result<(), Error> {
 }
 
 async fn client(socket: Socket, mut chat_tx: Sender<Subscription>) {
-    let mut rx = socket.rx;
     let client_id = socket.no;
+    let (tx, mut rx) = socket.into_text_chan().await;
 
     let sub = Subscription::Subscribe(Subscriber {
-        client_id: socket.no,
-        tx: socket.tx,
+        client_id: client_id,
+        tx: tx,
     });
     if let Err(_e) = chat_tx.send(sub).await {
         return;
     }
 
     spawn(async move {
-        while let Some(m) = rx.recv().await {
-            match m {
-                Msg::Text(text) => {
-                    let msg = format!("{} {}", client_id, text);
-                    if let Err(_e) = chat_tx.send(Subscription::Post(msg)).await {
-                        break;
-                    }
-                }
-                _ => (),
+        while let Some(text) = rx.recv().await {
+            let msg = format!("{} {}", client_id, text);
+            if let Err(_e) = chat_tx.send(Subscription::Post(msg)).await {
+                break;
             }
         }
         chat_tx
@@ -85,7 +80,7 @@ async fn client(socket: Socket, mut chat_tx: Sender<Subscription>) {
 
 struct Subscriber {
     client_id: usize,
-    tx: Sender<Msg>,
+    tx: Sender<String>,
 }
 
 enum Subscription {
@@ -97,12 +92,12 @@ enum Subscription {
 async fn chat() -> Sender<Subscription> {
     // room
     let (mut room_tx, mut room_rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
-    let (mut broker_tx, mut broker_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+    let (mut broker_tx, mut broker_rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
     let (sub_tx, mut sub_rx): (Sender<Subscription>, Receiver<Subscription>) = mpsc::channel(1);
 
     spawn(async move {
         while let Some(text) = room_rx.recv().await {
-            if let Err(_e) = broker_tx.send(Msg::Text(text)).await {
+            if let Err(_e) = broker_tx.send(text).await {
                 return;
             }
         }

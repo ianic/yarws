@@ -25,17 +25,17 @@ mod ws;
 
 pub struct Socket {
     pub no: usize,
-    pub tx: Sender<Msg>,
-    pub rx: Receiver<Msg>,
+    tx: Sender<ws::Msg>,
+    rx: Receiver<ws::Msg>,
 }
 
 impl Socket {
-    pub async fn recv(&mut self) -> Option<Message> {
+    pub async fn recv(&mut self) -> Option<Msg> {
         loop {
             match self.rx.recv().await {
                 None => return None, // channel exhausted
                 Some(m) => {
-                    let opt_msg = m.as_message();
+                    let opt_msg = m.as_msg();
                     match opt_msg {
                         None => continue, // skip control message type
                         _ => return opt_msg,
@@ -50,7 +50,7 @@ impl Socket {
             match self.rx.recv().await {
                 None => return None,
                 Some(m) => match m {
-                    Msg::Text(text) => return Some(text),
+                    ws::Msg::Text(text) => return Some(text),
                     _ => continue, // ignore other type of the messages
                 },
             }
@@ -64,62 +64,95 @@ impl Socket {
         }
     }
 
-    pub async fn send(&mut self, msg: Message) -> Result<(), Error> {
-        self.tx.send(msg.as_msg()).await?;
+    pub async fn send(&mut self, msg: Msg) -> Result<(), Error> {
+        self.tx.send(msg.as_ws_msg()).await?;
         Ok(())
     }
 
     pub async fn send_text(&mut self, text: &str) -> Result<(), Error> {
-        self.tx.send(Msg::Text(text.to_owned())).await?;
+        self.tx.send(ws::Msg::Text(text.to_owned())).await?;
         Ok(())
+    }
+
+    pub async fn into_text_chan(self) -> (Sender<String>, Receiver<String>) {
+        let (tx, mut i_rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
+        let (mut i_tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
+
+        let mut ws_rx = self.rx;
+        spawn(async move {
+            while let Some(ws_msg) = ws_rx.recv().await {
+                if let Some(msg) = ws_msg.as_msg() {
+                    match msg {
+                        Msg::Text(text) => {
+                            if let Err(_) = i_tx.send(text).await {
+                                break;
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+            }
+        });
+
+        let mut ws_tx = self.tx;
+        spawn(async move {
+            while let Some(text) = i_rx.recv().await {
+                if let Err(_) = ws_tx.send(ws::Msg::Text(text)).await {
+                    break;
+                }
+            }
+        });
+
+        (tx, rx)
     }
 }
 
-pub enum Message {
+pub enum Msg {
     Text(String),
     Binary(Vec<u8>),
 }
 
-impl Message {
-    fn as_msg(self) -> Msg {
+impl Msg {
+    fn as_ws_msg(self) -> ws::Msg {
         match self {
-            Message::Text(text) => Msg::Text(text),
-            Message::Binary(vec) => Msg::Binary(vec),
+            Msg::Text(text) => ws::Msg::Text(text),
+            Msg::Binary(vec) => ws::Msg::Binary(vec),
         }
     }
 }
 
 pub struct Server {
-    log: Logger,
-    listener: TcpListener,
+    rx: Receiver<Socket>,
 }
 
 impl Server {
-    pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<Receiver<Socket>, Error> {
+    pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<Self, Error> {
         let log = log.into().unwrap_or(log::null());
         let listener = TcpListener::bind(addr).await?;
-        let srv = Server {
-            log: log,
-            listener: listener,
-        };
-        Ok(srv.listen().await)
+        Ok(Self {
+            rx: Server::listen(listener, log).await,
+        })
     }
 
-    async fn listen(mut self) -> Receiver<Socket> {
+    pub async fn accept(&mut self) -> Option<Socket> {
+        self.rx.recv().await
+    }
+
+    async fn listen(mut listener: TcpListener, log: Logger) -> Receiver<Socket> {
         let (socket_tx, socket_rx): (Sender<Socket>, Receiver<Socket>) = mpsc::channel(1);
 
         let mut conn_no = 0;
         spawn(async move {
-            let mut incoming = self.listener.incoming();
+            let mut incoming = listener.incoming();
             while let Some(conn) = incoming.next().await {
                 match conn {
                     Ok(stream) => {
                         conn_no += 1;
-                        let log = self.log.new(o!("conn" => conn_no));
+                        let log = log.new(o!("conn" => conn_no));
                         let stx = socket_tx.clone();
                         spawn(async move { handle_stream(stream, conn_no, stx, log).await });
                     }
-                    Err(e) => error!(self.log, "accept error: {}", e),
+                    Err(e) => error!(log, "accept error: {}", e),
                 }
             }
         });
@@ -141,35 +174,6 @@ async fn handle_stream(stream: TcpStream, no: usize, mut sockets_tx: Sender<Sock
     }
 }
 
-#[derive(Debug)]
-pub enum Msg {
-    Binary(Vec<u8>),
-    Text(String),
-    Close(u16),
-    Ping(Vec<u8>),
-    Pong(Vec<u8>),
-}
-
-impl Msg {
-    pub fn clone(&self) -> Msg {
-        match self {
-            Msg::Text(text) => Msg::Text(text.clone()),
-            Msg::Binary(payload) => Msg::Binary(payload.clone()),
-            Msg::Close(status) => Msg::Close(*status),
-            Msg::Ping(payload) => Msg::Ping(payload.clone()),
-            Msg::Pong(payload) => Msg::Pong(payload.clone()),
-        }
-    }
-
-    pub fn as_message(self) -> Option<Message> {
-        match self {
-            Msg::Text(text) => Some(Message::Text(text)),
-            Msg::Binary(payload) => Some(Message::Binary(payload)),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Fail, Debug)]
 pub enum Error {
     #[fail(display = "invalid upgrade request")]
@@ -177,7 +181,7 @@ pub enum Error {
     #[fail(display = "IO error: {}", error)]
     IoError { error: io::Error },
     #[fail(display = "fail to send message upstream: {}", error)]
-    UpstreamError { error: mpsc::error::SendError<Msg> },
+    UpstreamError { error: mpsc::error::SendError<ws::Msg> },
     #[fail(display = "fail to send frame: {}", error)]
     ConnError { error: mpsc::error::SendError<Vec<u8>> },
     #[fail(display = "wrong header: {}", _0)]
@@ -197,8 +201,8 @@ impl From<io::Error> for Error {
         Error::IoError { error: e }
     }
 }
-impl From<mpsc::error::SendError<Msg>> for Error {
-    fn from(e: mpsc::error::SendError<Msg>) -> Self {
+impl From<mpsc::error::SendError<ws::Msg>> for Error {
+    fn from(e: mpsc::error::SendError<ws::Msg>) -> Self {
         Error::UpstreamError { error: e }
     }
 }

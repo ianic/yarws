@@ -1,4 +1,4 @@
-use super::{Error, Msg};
+use super::Error;
 use crate::http;
 use inflate::inflate_bytes;
 use rand::Rng;
@@ -12,6 +12,60 @@ use tokio::prelude::*;
 use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+
+#[derive(Debug)]
+pub enum Msg {
+    Binary(Vec<u8>),
+    Text(String),
+    Close(u16),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+}
+
+impl Msg {
+    pub fn clone(&self) -> Msg {
+        match self {
+            Msg::Text(text) => Msg::Text(text.clone()),
+            Msg::Binary(payload) => Msg::Binary(payload.clone()),
+            Msg::Close(status) => Msg::Close(*status),
+            Msg::Ping(payload) => Msg::Ping(payload.clone()),
+            Msg::Pong(payload) => Msg::Pong(payload.clone()),
+        }
+    }
+
+    pub fn as_msg(self) -> Option<super::Msg> {
+        match self {
+            Msg::Text(text) => Some(super::Msg::Text(text)),
+            Msg::Binary(payload) => Some(super::Msg::Binary(payload)),
+            _ => None,
+        }
+    }
+
+    fn as_raw(self, client: bool) -> Vec<u8> {
+        let w = FrameWriter::new(client);
+        match self {
+            Msg::Binary(payload) => w.binary(payload),
+            Msg::Text(text) => w.text(text),
+            Msg::Close(status) => w.close(status),
+            Msg::Ping(payload) => w.ping(payload),
+            Msg::Pong(payload) => w.pong(payload),
+        }
+    }
+
+    fn is_close(&self) -> bool {
+        match self {
+            Msg::Close(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_data(&self) -> bool {
+        match self {
+            Msg::Binary(_) | Msg::Text(_) => true,
+            _ => false,
+        }
+    }
+}
 
 pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
     trace!(log, "open");
@@ -54,33 +108,6 @@ impl Writer {
         });
 
         tx
-    }
-}
-
-impl Msg {
-    fn as_raw(self, client: bool) -> Vec<u8> {
-        let w = FrameWriter::new(client);
-        match self {
-            Msg::Binary(payload) => w.binary(payload),
-            Msg::Text(text) => w.text(text),
-            Msg::Close(status) => w.close(status),
-            Msg::Ping(payload) => w.ping(payload),
-            Msg::Pong(payload) => w.pong(payload),
-        }
-    }
-
-    fn is_close(&self) -> bool {
-        match self {
-            Msg::Close(_) => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_data(&self) -> bool {
-        match self {
-            Msg::Binary(_) | Msg::Text(_) => true,
-            _ => false,
-        }
     }
 }
 

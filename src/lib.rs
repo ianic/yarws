@@ -34,17 +34,16 @@ impl Socket {
         self.tx.send(Msg::Text(text.to_owned())).await?;
         Ok(())
     }
-    pub async fn receive(&mut self) -> Result<Option<String>, Error> {
-        match self.rx.recv().await {
-            None => Ok(None),
-            Some(m) => match m {
-                Msg::Text(t) => Ok(Some(t)),
-                Msg::Binary(buf) => match str::from_utf8(&buf) {
-                    Ok(s) => Ok(Some(s.to_owned())),
-                    Err(e) => return Err(Error::TextPayloadNotValidUTF8(e)),
+
+    pub async fn receive(&mut self) -> Result<String, Error> {
+        loop {
+            match self.rx.recv().await {
+                None => return Err(Error::SocketClosed),
+                Some(m) => match m {
+                    Msg::Text(text) => return Ok(text),
+                    _ => (), // ignore other type of the messages
                 },
-                _ => Ok(None),
-            },
+            }
         }
     }
 }
@@ -140,6 +139,8 @@ pub enum Error {
     TextPayloadNotValidUTF8(std::str::Utf8Error),
     #[fail(display = "failed to parse url: {} error: {}", url, error)]
     UrlParseError { url: String, error: url::ParseError },
+    #[fail(display = "socket closed")]
+    SocketClosed,
 }
 
 impl From<io::Error> for Error {

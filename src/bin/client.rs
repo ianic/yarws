@@ -1,4 +1,5 @@
 use structopt::StructOpt;
+use yarws::{connect, Error};
 
 #[derive(StructOpt, Debug)]
 struct Args {
@@ -6,11 +7,13 @@ struct Args {
     url: String,
 }
 
+// send different sizes of text messages to the echo server
+// and expect response to match the request
+
 #[tokio::main]
-async fn main() -> Result<(), yarws::Error> {
+async fn main() -> Result<(), Error> {
     let args = Args::from_args();
-    let socket = yarws::connect(&args.url, None).await?;
-    let mut caller = Caller { socket: socket };
+    let mut socket = connect(&args.url, None).await?;
 
     let data = "01234567890abcdefghijklmnopqrstuvwxyz"; //36 characters
     let sizes = vec![1, 36, 125, 126, 127, 65535, 65536, 65537];
@@ -18,22 +21,9 @@ async fn main() -> Result<(), yarws::Error> {
         let rep = size / data.len() + 1;
         let req = &data.repeat(rep)[0..size];
 
-        let rsp = caller.call(req).await?;
+        socket.send(req).await?;
+        let rsp = socket.receive().await?;
         assert_eq!(req, rsp);
     }
     Ok(())
-}
-
-struct Caller {
-    socket: yarws::Socket,
-}
-
-impl Caller {
-    async fn call(&mut self, req: &str) -> Result<String, yarws::Error> {
-        self.socket.send(req).await?;
-        if let Some(text) = self.socket.receive().await? {
-            return Ok(text);
-        }
-        Ok(String::new())
-    }
 }

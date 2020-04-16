@@ -1,6 +1,7 @@
 use slog::Logger;
 use std::str;
 use structopt::StructOpt;
+use yarws::{connect, log, Error, Socket};
 
 #[macro_use]
 extern crate slog;
@@ -12,9 +13,9 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), yarws::Error> {
+async fn main() -> Result<(), Error> {
     let args = Args::from_args();
-    let log = yarws::log::config();
+    let log = log::config();
 
     let cc = get_case_count(&args.url, log.clone()).await?;
     info!(log, "case count {}", cc);
@@ -22,7 +23,7 @@ async fn main() -> Result<(), yarws::Error> {
     for i in 1..(cc + 1) {
         let l = log.new(o!("conn" => i));
         let url = format!("{}/runCase?case={}&agent=yarws", &args.url, i);
-        let socket = match yarws::connect(&url, l).await {
+        let socket = match connect(&url, l).await {
             Ok(s) => s,
             Err(e) => {
                 error!(log, "{}", e);
@@ -40,27 +41,26 @@ async fn main() -> Result<(), yarws::Error> {
     Ok(())
 }
 
-async fn echo(mut socket: yarws::Socket, _log: Logger) -> Result<(), yarws::Error> {
+async fn echo(mut socket: Socket, _log: Logger) -> Result<(), Error> {
     while let Some(msg) = socket.rx.recv().await {
         socket.tx.send(msg).await?;
     }
     Ok(())
 }
 
-async fn generate_report(root: &str, log: Logger) -> Result<(), yarws::Error> {
+async fn generate_report(root: &str, log: Logger) -> Result<(), Error> {
     let url = root.to_owned() + "/updateReports?agent=yarws";
-    let mut socket = yarws::connect(&url, log).await?;
+    let mut socket = connect(&url, log).await?;
     while let Some(_msg) = socket.rx.recv().await {}
     Ok(())
 }
 
-async fn get_case_count(root: &str, log: Logger) -> Result<usize, yarws::Error> {
+async fn get_case_count(root: &str, log: Logger) -> Result<usize, Error> {
     let url = root.to_owned() + "/getCaseCount";
-    let mut socket = yarws::connect(&url, log).await?;
-    if let Some(msg) = socket.receive().await? {
-        if let Ok(i) = msg.as_str().parse::<usize>() {
-            return Ok(i);
-        }
+    let mut socket = connect(&url, log).await?;
+    let msg = socket.receive().await?;
+    if let Ok(i) = msg.as_str().parse::<usize>() {
+        return Ok(i);
     }
     Ok(0)
 }

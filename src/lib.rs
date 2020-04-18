@@ -1,3 +1,157 @@
+//! WebSocket server and client implementation.  
+//! Based on tokio runtime.
+//!
+//! Per message deflate is implemented for incoming messages. Lib can receive compressed messages. Currently all outgoing messages are sent uncompressed.
+//!
+//! Lib is passing all [autobahn] tests. Including those for compressed messages.
+//!
+//!
+//! # Examples
+//!
+//! ## Server:
+//! ```
+//! let mut srv = yarws::Server::bind("127.0.0.1:9001", None).await?;
+//! while let Some(socket) = srv.accept().await {
+//!     while let Some(msg) = socket.recv().await {
+//!         socket.send(msg).await?;
+//!     }
+//! }
+//! ```
+//! This is an example of echo server. We are replying with the same message on each incoming message.  
+//! First line starts listening for WebSocket connections on an ip:port.  
+//! Each client is represented by [`Socket`] returned from [`accept`].  
+//! For each client we are looping while messages arrive and replying with the same message.  
+//! For the complete echo server example refer to [src/bin/echo_server.rs].
+//!
+//! ## Client:
+//! ```
+//! let mut socket = yarws::connect("ws://127.0.0.1:9001", None).await?;
+//! while let Some(msg) = socket.recv().await {
+//!     socket.send(msg).await?;
+//! }
+//! ```
+//! This is example of an echo client.  
+//! [`connect`] method returns [`Socket`] which is used to send and receive messages.  
+//! Looping on recv returns each incoming message until socket is closed.  
+//! Here in loop we reply with the same message.  
+//! For the complete echo client example refer to [src/bin/echo_client.rs].
+//!
+//!
+//! # Usage
+//! Run client with external echo server.   
+//! ```shell
+//! cargo run --bin client -- ws://echo.websocket.org
+//! ```
+//! Client will send few messages of different sizes and expect to get the same in return.  
+//! If everything went fine will finish without error.
+//!
+//! To run same client on our server. First start server:
+//! ```shell
+//! cargo run --bin echo_server
+//! ```
+//! Then in other terminal run client:
+//! ```shell
+//! cargo run --bin client
+//! ```
+//! If it is in trace log mode server will log type and size of every message it receives.
+//!
+//! ## websocat test tool
+//! You can use [websocat] to connect to the server and test communication.  
+//! First start server:
+//! ```shell
+//! cargo run --bin echo_server
+//! ```
+//! Then in other terminal run websocat:
+//! ```shell
+//! websocat -E --linemode-strip-newlines ws://127.0.0.1:9001
+//! ```
+//! Type you message press enter to send it and server will reply with the same message.  
+//! For more exciting server run it in with reverse flag:
+//! ```shell
+//! cargo run --bin echo_server -- --reverse
+//! ```
+//! and than use websocat to send text messages.
+//!
+//! # Autobahn tests
+//! Ensure that you have [wstest] autobahn-testsuite test tool installed:
+//! ```shell
+//! pip install autobahntestsuite
+//! ```
+//! Start echo_server:
+//! ```shell
+//! cargo run --bin echo_server
+//! ```
+//! In another terminal run server tests and view results:
+//! ```shell
+//! cd autobahn
+//! wstest -m fuzzingclient
+//! open reports/server/index.html
+//! ```
+//!
+//! For testing client implementation first start autobahn server suite:
+//! ```shell
+//! wstest -m fuzzingserver
+//! ```
+//! Then in another terminal run client tests and view results:
+//! ```shell
+//! cargo run --bin autobahn_client
+//! open autobahn/reports/client/index.html
+//! ```
+//! For development purpose there is automation for running autobahn test suite and showing results:
+//! ```shell
+//! cargo run --bin autobahn_server_test
+//! ```
+//! you can use run that in development on every file change with cargo-watch:
+//! ```shell
+//! cargo watch -x 'run --bin autobahn_server_test'
+//! ```
+//!
+//! # Chat server example
+//! Simple example of server accepting text messages and distributing them to the all connected clients.  
+//! First start chat server:
+//! ```shell
+//! cargo run --bin chat_server
+//! ```
+//! Then in browser development console connect to the server and send chat messages:
+//! ```javascript
+//! var socket = new WebSocket('ws://127.0.0.1:9001');
+//! var msgNo = 0;
+//! var interval;
+//! socket.addEventListener('open', function (event) {
+//!     console.log('open');
+//!     socket.send("new client");
+//!     interval = setInterval(function() {
+//!         msgNo++;
+//!         socket.send("message: " + msgNo);
+//!     }, 1000);
+//! });
+//! socket.addEventListener('message', function (event) {
+//!     console.log('chat', event.data);
+//! });
+//! socket.addEventListener('close', function (event) {
+//!     console.log('closed');
+//!     clearInterval(interval);
+//! });
+//! ```
+//! Start multiple browser tabs with the same code running.  
+//! You can disconnect from the server with: `socket.close();`.
+//!
+//! # References
+//! [WebSocket Protocol] IETF RFC 6455  
+//! [MDN writing WebSocket servers]  
+//!
+//! [WebSocket Protocol]: https://tools.ietf.org/html/rfc6455
+//! [MDN writing WebSocket servers]: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers
+//!
+//! [`Socket`]: struct.Socket.html
+//! [`accept`]: struct.Server.html#method.accept
+//! [src/bin/echo_client.rs]: https://github.com/ianic/yarws/blob/master/src/bin/echo_client.rs
+//! [src/bin/echo_server.rs]: https://github.com/ianic/yarws/blob/master/src/bin/echo_server.rs
+//! [websocat]: https://github.com/vi/websocat
+//! [wstest]: https://github.com/crossbario/autobahn-testsuite
+//! [autobahn]: https://github.com/crossbario/autobahn-testsuite
+//! [cargo-watch]: https://github.com/passcod/cargo-watch
+//!
 use slog::Logger;
 use std::str;
 use tokio;
@@ -23,6 +177,11 @@ mod http;
 pub mod log;
 mod ws;
 
+/// Represent a WebSocket connection. Used for sending and receiving messages.  
+///
+/// For reading incoming messages loop over recv() method while it returns Some<Msg>. None means that underlying WebSocket connection is closed.  
+///
+/// For sending messages use send() method. It will return Error in the case when underlying connection is closed, otherwise it will succeed.
 pub struct Socket {
     pub no: usize,
     tx: Sender<ws::Msg>,
@@ -107,12 +266,17 @@ impl Socket {
     }
 }
 
+/// Message arrived from the WebSocket connection or the one we send.
+///
+/// Can be text or binary. Text messages are valid UTF-8 strings. Binary of course can be anything.  
+/// Web servers will typically send text messages.
 pub enum Msg {
     Text(String),
     Binary(Vec<u8>),
 }
 
 impl Msg {
+    /// Converts to Msg used in `ws` module.
     fn into_ws_msg(self) -> ws::Msg {
         match self {
             Msg::Text(text) => ws::Msg::Text(text),
@@ -121,11 +285,14 @@ impl Msg {
     }
 }
 
+/// For creating WebSocket servers.
 pub struct Server {
     rx: Receiver<Socket>,
 }
 
 impl Server {
+    /// Starts tcp listener on the provided addr (typically ip:port).  
+    /// Errors if binding can't be started. In most cases because port is already used, but other errors could occur also; too many open files, incorrect addr.
     pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<Self, Error> {
         let log = log.into().unwrap_or(log::null());
         let listener = TcpListener::bind(addr).await?;
@@ -134,6 +301,8 @@ impl Server {
         })
     }
 
+    /// Returns `Socket` for successfully established WebSocket connection.  
+    /// Loop over this method to handle all incoming connections.  
     pub async fn accept(&mut self) -> Option<Socket> {
         self.rx.recv().await
     }
@@ -175,6 +344,7 @@ async fn handle_stream(stream: TcpStream, no: usize, mut sockets_tx: Sender<Sock
 }
 
 #[derive(Fail, Debug)]
+/// Definition of all errors returned from the library.
 pub enum Error {
     #[fail(display = "invalid upgrade request")]
     InvalidUpgradeRequest,
@@ -218,6 +388,7 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
+/// Connects to the WebSocket server and on success returns `Socket`.
 pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
     let log = log.into().unwrap_or(log::null());
     let (addr, path) = parse_url(url)?;

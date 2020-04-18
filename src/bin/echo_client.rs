@@ -1,6 +1,5 @@
-use slog::Logger;
 use structopt::StructOpt;
-use yarws::{connect, log, Error, Socket};
+use yarws::{connect, log, Error};
 
 #[macro_use]
 extern crate slog;
@@ -22,25 +21,23 @@ impl Args {
 
 #[tokio::main]
 async fn main() {
-    let args = Args::from_args();
-    let log = log::config();
-
-    let socket = match connect(&args.addr(), log.clone()).await {
-        Ok(s) => s,
-        Err(e) => {
-            error!(log, "{}", e);
-            return;
+    let status = {
+        let args = Args::from_args();
+        let log = log::config();
+        if let Err(e) = run(&args.addr()).await {
+            error!(log, "{}", e; "addr" => args.addr());
+            1
+        } else {
+            0
         }
     };
-
-    if let Err(e) = handler(socket, log.clone()).await {
-        error!(log, "{}", e);
-    }
+    std::process::exit(status);
 }
 
-async fn handler(mut s: Socket, _log: Logger) -> Result<(), Error> {
-    while let Some(msg) = s.recv().await {
-        s.send(msg).await?;
+async fn run(addr: &str) -> Result<(), Error> {
+    let mut socket = connect(addr, None).await?;
+    while let Some(msg) = socket.recv().await {
+        socket.send(msg).await?;
     }
     Ok(())
 }

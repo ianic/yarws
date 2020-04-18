@@ -1,6 +1,8 @@
+//! Configuration for slog Logger helpers used in examples.
 use slog::Drain;
 use slog::Logger;
 
+/// Configures default logger.
 pub fn config() -> Logger {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -21,6 +23,7 @@ pub fn config() -> Logger {
     )
 }
 
+/// Returns null logger which discards all logging.
 pub fn null() -> Logger {
     slog::Logger::root(slog_stdlog::StdLog.fuse(), o!())
 }

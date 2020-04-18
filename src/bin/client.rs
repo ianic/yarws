@@ -16,7 +16,7 @@ async fn main() -> Result<(), Error> {
     let mut socket = connect(&args.url, None).await?;
 
     let data = "01234567890abcdefghijklmnopqrstuvwxyz"; //36 characters
-    let sizes = vec![1, 36, 125, 126, 127, 65535, 65536, 65537];
+    let sizes = vec![1, 36, 125, 126, 127, 65535, 65536, 65537, 1048576];
     for size in sizes {
         let rep = size / data.len() + 1;
         let req = &data.repeat(rep)[0..size];

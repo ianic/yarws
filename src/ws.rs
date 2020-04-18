@@ -84,14 +84,25 @@ struct Writer {}
 
 impl Writer {
     fn spawn(mut stream_tx: WriteHalf<TcpStream>, mask_frames: bool, log: Logger) -> Sender<Msg> {
-        let (tx, mut rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+        let (tx, mut rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
         spawn(async move {
-            while let Some(m) = rx.recv().await {
+            'outer: while let Some(m) = rx.recv().await {
                 let close = m.is_close();
-                let raw = m.into_raw(mask_frames);
-                if let Err(e) = stream_tx.write(&raw).await {
-                    error!(log, "{}", e);
-                    break;
+                let raw_vec = m.into_raw(mask_frames);
+                let mut raw = raw_vec.as_slice();
+                loop {
+                    match stream_tx.write(&raw).await {
+                        Err(e) => {
+                            error!(log, "{}", e);
+                            break 'outer;
+                        }
+                        Ok(n) => {
+                            if n == raw.len() {
+                                break; // done everything is written
+                            }
+                            raw = &raw[n..]; // resize, remove written leave unwritten and try again
+                        }
+                    }
                 }
                 if close {
                     break;
@@ -120,7 +131,7 @@ impl Reader {
         deflate_supported: bool,
         log: slog::Logger,
     ) -> Receiver<Msg> {
-        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
         let mut reader = Reader {
             deflate_supported: deflate_supported,
             stream_rx: stream_rx,
@@ -191,7 +202,7 @@ impl Reader {
             frame.validate_payload()?;
 
             // process message
-            trace!(self.log, "message" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len, "header_len" => frame.header_len, "mask" => frame.mask);
+            trace!(self.log, "read" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len, "header_len" => frame.header_len, "mask" => frame.mask);
             match frame.opcode.value() {
                 TEXT | BINARY => self.tx.send(frame.into_ws_msg()).await?,
                 PING => self.control_tx.send(frame.to_pong()).await?,

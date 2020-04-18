@@ -216,7 +216,10 @@ impl Reader {
             }
             if let Err(e) = frame.validate_payload() {
                 error!(self.log, "{}", e);
-                break STATUS_PROTOCOL_ERROR;
+                break match e {
+                    Error::TextPayloadNotValidUTF8(_) => STATUS_NOT_VALID_UTF8,
+                    _ => STATUS_PROTOCOL_ERROR,
+                };
             }
 
             // process message
@@ -249,6 +252,7 @@ struct Frame {
 }
 
 const STATUS_PROTOCOL_ERROR: u16 = 1002;
+const STATUS_NOT_VALID_UTF8: u16 = 1007;
 
 // data frame types
 const CONTINUATION: u8 = 0;

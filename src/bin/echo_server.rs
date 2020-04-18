@@ -43,9 +43,13 @@ async fn run(args: &Args, log: slog::Logger) -> Result<(), Error> {
     while let Some(socket) = srv.accept().await {
         let log = log.new(o!("conn" => socket.no));
         if args.reverse {
-            reverse_echo(socket).await?;
+            if let Err(e) = reverse_echo(socket).await {
+                error!(log, "{}", e);
+            }
         } else {
-            echo(socket).await?;
+            if let Err(e) = echo(socket).await {
+                error!(log, "{}", e);
+            }
         };
         trace!(log, "socket closed");
     }

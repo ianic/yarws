@@ -58,6 +58,16 @@ impl Msg {
             _ => false,
         }
     }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Msg::Binary(_) => "binary",
+            Msg::Text(_) => "text",
+            Msg::Close(_) => "close",
+            Msg::Ping(_) => "ping",
+            Msg::Pong(_) => "pong",
+        }
+    }
 }
 
 pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
@@ -69,8 +79,8 @@ pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Send
     // rx receive end
     // tx transmit end
     // stream is tcp connection
-    // Reader is transforming form raw tcp stream to the valid websocket frames
-    // socket is websocet implementation passed downstream
+    // Reader is transforming form raw tcp stream to the valid WebSocket frames
+    // socket is WebSocket implementation passed downstream
     // Writer is writing to the outbound tcp stream
     let (stream_rx, stream_tx) = io::split(upgrade.stream);
     let writer_tx = Writer::spawn(stream_tx, mask_frames, log.clone());
@@ -84,12 +94,14 @@ struct Writer {}
 
 impl Writer {
     fn spawn(mut stream_tx: WriteHalf<TcpStream>, mask_frames: bool, log: Logger) -> Sender<Msg> {
-        let (tx, mut rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+        let (tx, mut rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
         spawn(async move {
             'outer: while let Some(m) = rx.recv().await {
                 let close = m.is_close();
+                let kind = m.kind(); //.to_owned();
                 let raw_vec = m.into_raw(mask_frames);
                 let mut raw = raw_vec.as_slice();
+                trace!(log, "write"; "kind" => kind, "payload_len" => raw.len());
                 loop {
                     match stream_tx.write(&raw).await {
                         Err(e) => {
@@ -131,7 +143,7 @@ impl Reader {
         deflate_supported: bool,
         log: slog::Logger,
     ) -> Receiver<Msg> {
-        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(16);
+        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
         let mut reader = Reader {
             deflate_supported: deflate_supported,
             stream_rx: stream_rx,
@@ -189,7 +201,10 @@ impl Reader {
             self.read_payload(&mut frame).await?;
 
             // validate frame, if it is fragment wait for more
-            frame.validate(self.deflate_supported, fragment.is_some())?;
+            if let Err(e) = frame.validate(self.deflate_supported, fragment.is_some()) {
+                error!(self.log, "{}", e);
+                break STATUS_PROTOCOL_ERROR;
+            }
             if frame.is_fragment() {
                 trace!(self.log, "fragment" ;"opcode" =>  frame.opcode.desc(), "len" => frame.payload_len);
                 let (new_frame, new_fragment) = frame.into_fragment(fragment);
@@ -199,7 +214,10 @@ impl Reader {
                     None => continue, // current frame is fragment, wait for more
                 }
             }
-            frame.validate_payload()?;
+            if let Err(e) = frame.validate_payload() {
+                error!(self.log, "{}", e);
+                break STATUS_PROTOCOL_ERROR;
+            }
 
             // process message
             trace!(self.log, "read" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len, "header_len" => frame.header_len, "mask" => frame.mask);
@@ -229,6 +247,8 @@ struct Frame {
     payload: Vec<u8>,
     text_payload: String,
 }
+
+const STATUS_PROTOCOL_ERROR: u16 = 1002;
 
 // data frame types
 const CONTINUATION: u8 = 0;

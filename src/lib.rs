@@ -1,29 +1,34 @@
-//! WebSocket server and client implementation.  
-//! Based on [Tokio] runtime.
+//! WebSocket protocol implementation based on [Tokio] runtime. For building
+//! WebSocket server or clients.
 //!
-//! Per message deflate is implemented for incoming messages. Lib can receive compressed messages.
-//! Currently all outgoing messages are sent uncompressed.
+//! yarws = Yet Another Rust WebSocket library
 //!
-//! Lib is passing all [autobahn] tests. Including those for compressed messages.
+//!
+//! Lib is passing all [autobahn] tests. Including those for compressed
+//! messages. Per message deflate is implemented for incoming messages. Lib can
+//! receive compressed messages. Currently all outgoing messages are sent
+//! uncompressed.
 //!
 //!
 //! # Examples
 //!
 //! ## Server:
 //! ```
-//! let mut srv = yarws::Server::bind("127.0.0.1:9001", None).await?;
+//! let mut srv = yarws::bind("127.0.0.1:9001", None).await?;
 //! while let Some(socket) = srv.accept().await {
-//!     spawn(async move {
+//!     tokio::spawn(async move {
 //!         while let Some(msg) = socket.recv().await {
 //!             socket.send(msg).await.unwrap();
 //!         }
 //!     }
 //! }
 //! ```
-//! This is an example of echo server. We are replying with the same message on each incoming message.  
+//! This is an example of echo server. We are replying with the same message on
+//! each incoming message.  
 //! First line starts listening for WebSocket connections on an ip:port.  
 //! Each client is represented by [`Socket`] returned from [`accept`].  
-//! For each client we are looping while messages arrive and replying with the same message.  
+//! For each client we are looping while messages arrive and replying with the
+//! same message.  
 //! For the complete echo server example refer to [src/bin/echo_server.rs].
 //!
 //! ## Client:
@@ -34,7 +39,8 @@
 //! }
 //! ```
 //! This is example of an echo client.  
-//! [`connect`] method returns [`Socket`] which is used to send and receive messages.  
+//! [`connect`] method returns [`Socket`] which is used to send and receive
+//! messages.  
 //! Looping on recv returns each incoming message until socket is closed.  
 //! Here in loop we reply with the same message.  
 //! For the complete echo client example refer to [src/bin/echo_client.rs].
@@ -45,7 +51,8 @@
 //! ```shell
 //! cargo run --bin client -- ws://echo.websocket.org
 //! ```
-//! Client will send few messages of different sizes and expect to get the same in return.  
+//! Client will send few messages of different sizes and expect to get the same
+//! in return.  
 //! If everything went fine will finish without error.
 //!
 //! To run same client on our server. First start server:
@@ -56,7 +63,8 @@
 //! ```shell
 //! cargo run --bin client
 //! ```
-//! If it is in trace log mode server will log type and size of every message it receives.
+//! If it is in trace log mode server will log type and size of every message it
+//! receives.
 //!
 //! ## websocat test tool
 //! You can use [websocat] to connect to the server and test communication.  
@@ -68,7 +76,8 @@
 //! ```shell
 //! websocat -E --linemode-strip-newlines ws://127.0.0.1:9001
 //! ```
-//! Type you message press enter to send it and server will reply with the same message.  
+//! Type you message press enter to send it and server will reply with the same
+//! message.  
 //! For more exciting server run it in with reverse flag:
 //! ```shell
 //! cargo run --bin echo_server -- --reverse
@@ -100,7 +109,8 @@
 //! cargo run --bin autobahn_client
 //! open autobahn/reports/client/index.html
 //! ```
-//! For development purpose there is automation for running autobahn test suite and showing results:
+//! For development purpose there is automation for running autobahn test suite
+//! and showing results:
 //! ```shell
 //! cargo run --bin autobahn_server_test
 //! ```
@@ -110,12 +120,14 @@
 //! ```
 //!
 //! # Chat server example
-//! Simple example of server accepting text messages and distributing them to the all connected clients.  
+//! Simple example of server accepting text messages and distributing them to
+//! the all connected clients.  
 //! First start chat server:
 //! ```shell
 //! cargo run --bin chat_server
 //! ```
-//! Then in browser development console connect to the server and send chat messages:
+//! Then in browser development console connect to the server and send chat
+//! messages:
 //! ```javascript
 //! var socket = new WebSocket('ws://127.0.0.1:9001');
 //! var msgNo = 0;
@@ -180,6 +192,29 @@ extern crate hex_literal;
 mod http;
 pub mod log;
 mod ws;
+
+/// Binds tcp listener to the provided addr (typically ip:port).  
+///
+/// Errors if binding can't be started. In most cases because port is
+/// already used, but other errors could occur also; too many open files,
+/// incorrect addr.
+pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<Server, Error> {
+    let log = log.into().unwrap_or(log::null());
+    let listener = TcpListener::bind(addr).await?;
+    Ok(Server {
+        rx: Server::listen(listener, log).await,
+    })
+}
+
+/// Connects to the WebSocket server and on success returns `Socket`.
+pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
+    let log = log.into().unwrap_or(log::null());
+    let (addr, path) = parse_url(url)?;
+    let stream = TcpStream::connect(&addr).await?; // establish tcp connection
+    let upgrade = http::connect(stream, &addr, &path).await?; // upgrade it from http to WebSocket
+    let (rx, tx) = ws::start(upgrade, log.clone()).await; // start ws
+    Ok(Socket { no: 1, rx: rx, tx: tx })
+}
 
 /// Represent a WebSocket connection. Used for sending and receiving messages.  
 #[derive(Debug)]
@@ -374,18 +409,6 @@ pub struct Server {
 }
 
 impl Server {
-    /// Starts tcp listener on the provided addr (typically ip:port).  
-    /// Errors if binding can't be started. In most cases because port is
-    /// already used, but other errors could occur also; too many open files,
-    /// incorrect addr.
-    pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<Self, Error> {
-        let log = log.into().unwrap_or(log::null());
-        let listener = TcpListener::bind(addr).await?;
-        Ok(Self {
-            rx: Server::listen(listener, log).await,
-        })
-    }
-
     /// Returns `Socket` for successfully established WebSocket connection.
     /// Loop over this method to handle all incoming connections.  
     pub async fn accept(&mut self) -> Option<Socket> {
@@ -432,16 +455,6 @@ async fn accept(stream: TcpStream, mut socket_tx: Sender<Socket>, no: usize, log
     let socket = Socket { no: no, rx: rx, tx: tx };
     socket_tx.send(socket).await?;
     Ok(())
-}
-
-/// Connects to the WebSocket server and on success returns `Socket`.
-pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
-    let log = log.into().unwrap_or(log::null());
-    let (addr, path) = parse_url(url)?;
-    let stream = TcpStream::connect(&addr).await?; // establish tcp connection
-    let upgrade = http::connect(stream, &addr, &path).await?; // upgrade it from http to WebSocket
-    let (rx, tx) = ws::start(upgrade, log.clone()).await; // start ws
-    Ok(Socket { no: 1, rx: rx, tx: tx })
 }
 
 #[derive(Fail, Debug)]

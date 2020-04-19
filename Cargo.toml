@@ -1,8 +1,10 @@
 [package]
 name = "yarws"
-description = "Yet another Rust websocket library"
+description = "Yet Another Rust WebSocket library"
 version = "0.1.0"
 authors = ["Igor Anic <igor.anic@gmail.com>"]
+repository = "https://github.com/ianic/yarws"
+license = "MIT"
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

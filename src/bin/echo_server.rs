@@ -1,7 +1,7 @@
 use structopt::StructOpt;
 use tokio;
 use tokio::spawn;
-use yarws::{log, Error, Msg, Server, Socket};
+use yarws::{bind, log, Error, Msg, Socket};
 
 #[macro_use]
 extern crate slog;
@@ -40,7 +40,7 @@ async fn main() {
 }
 
 async fn run(args: &Args, log: slog::Logger) -> Result<(), Error> {
-    let mut srv = Server::bind(&args.addr(), log.clone()).await?;
+    let mut srv = bind(&args.addr(), log.clone()).await?;
     let reverse = args.reverse;
     while let Some(socket) = srv.accept().await {
         let log = log.new(o!("conn" => socket.no));

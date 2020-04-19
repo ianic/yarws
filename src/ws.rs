@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Debug)]
+// Message for communitacion whith upstream part of the library.
 pub enum Msg {
     Binary(Vec<u8>),
     Text(String),
@@ -70,26 +71,21 @@ impl Msg {
     }
 }
 
-pub async fn handle(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
+pub async fn start(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
     trace!(log, "open");
 
     let mask_frames = upgrade.client;
     let deflate_supported = upgrade.deflate_supported;
 
-    // rx receive end
-    // tx transmit end
-    // stream is tcp connection
-    // Reader is transforming form raw tcp stream to the valid WebSocket frames
-    // socket is WebSocket implementation passed downstream
-    // Writer is writing to the outbound tcp stream
-    let (stream_rx, stream_tx) = io::split(upgrade.stream);
-    let writer_tx = Writer::spawn(stream_tx, mask_frames, log.clone());
-    let socket_rx = Reader::spawn(stream_rx, writer_tx.clone(), deflate_supported, log);
+    // Note: rx receive end, tx transmit end
+    let (stream_rx, stream_tx) = io::split(upgrade.stream); // split incoming TcpStream into read and write half
+    let writer_tx = Writer::spawn(stream_tx, mask_frames, log.clone()); // handle write half
+    let socket_rx = Reader::spawn(stream_rx, writer_tx.clone(), deflate_supported, log); // handle read half
 
-    (socket_rx, writer_tx)
+    (socket_rx, writer_tx) // channel for communication with the upstream part of the library
 }
 
-// Writer writes raw data to the outbound tcp stream
+// Writes byteas to the outbound tcp stream.
 struct Writer {}
 
 impl Writer {
@@ -127,6 +123,11 @@ impl Writer {
     }
 }
 
+// Reads bytes from the ReadHalf of the TcpStream.
+// Parses bytes as WebSocket frames, validates frame rules. Convers frames to
+// the Msg for communication with the application. Emits Msgs to the application
+// (tx channel), and in the case of controll messages directly to the other side
+// of WebSocket (control_tx channel).
 struct Reader {
     deflate_supported: bool,
     stream_rx: ReadHalf<TcpStream>,

@@ -1,7 +1,8 @@
 //! WebSocket server and client implementation.  
 //! Based on tokio runtime.
 //!
-//! Per message deflate is implemented for incoming messages. Lib can receive compressed messages. Currently all outgoing messages are sent uncompressed.
+//! Per message deflate is implemented for incoming messages. Lib can receive compressed messages.
+//! Currently all outgoing messages are sent uncompressed.
 //!
 //! Lib is passing all [autobahn] tests. Including those for compressed messages.
 //!
@@ -179,9 +180,12 @@ mod ws;
 
 /// Represent a WebSocket connection. Used for sending and receiving messages.  
 ///
-/// For reading incoming messages loop over recv() method while it returns Some<Msg>. None means that underlying WebSocket connection is closed.  
+/// For reading incoming messages loop over recv() method while it returns
+/// Some<Msg>. None means that underlying WebSocket connection is closed.  
 ///
-/// For sending messages use send() method. It will return Error in the case when underlying connection is closed, otherwise it will succeed.
+/// For sending messages use send() method. It will return Error in the case
+/// when underlying connection is closed, otherwise it will succeed.
+#[derive(Debug)]
 pub struct Socket {
     pub no: usize,
     tx: Sender<ws::Msg>,
@@ -266,7 +270,7 @@ impl Socket {
     }
 }
 
-/// Message arrived from the WebSocket connection or the one we send.
+/// Message exchanged between library and application.
 ///
 /// Can be text or binary. Text messages are valid UTF-8 strings. Binary of course can be anything.  
 /// Web servers will typically send text messages.
@@ -292,7 +296,9 @@ pub struct Server {
 
 impl Server {
     /// Starts tcp listener on the provided addr (typically ip:port).  
-    /// Errors if binding can't be started. In most cases because port is already used, but other errors could occur also; too many open files, incorrect addr.
+    /// Errors if binding can't be started. In most cases because port is
+    /// already used, but other errors could occur also; too many open files,
+    /// incorrect addr.
     pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<Self, Error> {
         let log = log.into().unwrap_or(log::null());
         let listener = TcpListener::bind(addr).await?;
@@ -301,25 +307,26 @@ impl Server {
         })
     }
 
-    /// Returns `Socket` for successfully established WebSocket connection.  
+    /// Returns `Socket` for successfully established WebSocket connection.
     /// Loop over this method to handle all incoming connections.  
     pub async fn accept(&mut self) -> Option<Socket> {
         self.rx.recv().await
     }
 
+    // Listens for incoming tcp connections. Upgrades them to WebSocket and
+    // feeds socket_tx channel with Socket for each established connection.
     async fn listen(mut listener: TcpListener, log: Logger) -> Receiver<Socket> {
         let (socket_tx, socket_rx): (Sender<Socket>, Receiver<Socket>) = mpsc::channel(1);
 
-        let mut conn_no = 0;
         spawn(async move {
+            let mut conn_no = 0;
             let mut incoming = listener.incoming();
             while let Some(conn) = incoming.next().await {
                 match conn {
                     Ok(stream) => {
                         conn_no += 1;
                         let log = log.new(o!("conn" => conn_no));
-                        let stx = socket_tx.clone();
-                        spawn(async move { handle_stream(stream, conn_no, stx, log).await });
+                        spawn_accept(stream, socket_tx.clone(), conn_no, log).await;
                     }
                     Err(e) => error!(log, "accept error: {}", e),
                 }
@@ -330,17 +337,32 @@ impl Server {
     }
 }
 
-async fn handle_stream(stream: TcpStream, no: usize, mut sockets_tx: Sender<Socket>, log: Logger) {
-    match http::upgrade(stream).await {
-        Ok(u) => {
-            let (rx, tx) = ws::handle(u, log.clone()).await;
-            let s = Socket { no: no, rx: rx, tx: tx };
-            if let Err(e) = sockets_tx.send(s).await {
-                error!(log, "unable to open socket: {}", e);
-            }
+async fn spawn_accept(stream: TcpStream, socket_tx: Sender<Socket>, no: usize, log: Logger) {
+    spawn(async move {
+        if let Err(e) = accept(stream, socket_tx, no, log.clone()).await {
+            error!(log, "{}", e);
         }
-        Err(e) => error!(log, "upgrade error: {}", e),
-    }
+    });
+}
+
+// Upgrades tcp connection to the WebSocket, starts ws handler and returns new
+// Socket through socket_tx channel.
+async fn accept(stream: TcpStream, mut socket_tx: Sender<Socket>, no: usize, log: Logger) -> Result<(), Error> {
+    let upgrade = http::accept(stream).await?;
+    let (rx, tx) = ws::start(upgrade, log).await;
+    let socket = Socket { no: no, rx: rx, tx: tx };
+    socket_tx.send(socket).await?;
+    Ok(())
+}
+
+/// Connects to the WebSocket server and on success returns `Socket`.
+pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
+    let log = log.into().unwrap_or(log::null());
+    let (addr, path) = parse_url(url)?;
+    let stream = TcpStream::connect(&addr).await?; // establish tcp connection
+    let upgrade = http::connect(stream, &addr, &path).await?; // upgrade it from http to WebSocket
+    let (rx, tx) = ws::start(upgrade, log.clone()).await; // start ws
+    Ok(Socket { no: 1, rx: rx, tx: tx })
 }
 
 #[derive(Fail, Debug)]
@@ -350,10 +372,14 @@ pub enum Error {
     InvalidUpgradeRequest,
     #[fail(display = "IO error: {}", error)]
     IoError { error: io::Error },
-    #[fail(display = "fail to send message upstream: {}", error)]
-    UpstreamError { error: mpsc::error::SendError<ws::Msg> },
-    #[fail(display = "fail to send frame: {}", error)]
-    ConnError { error: mpsc::error::SendError<Vec<u8>> },
+
+    #[fail(display = "fail to send Msg: {}", error)]
+    MsgSendError { error: mpsc::error::SendError<ws::Msg> },
+    #[fail(display = "fail to send bytes: {}", error)]
+    RawSendError { error: mpsc::error::SendError<Vec<u8>> },
+    #[fail(display = "fail to send socket: {}", error)]
+    SocketSendError { error: mpsc::error::SendError<Socket> },
+
     #[fail(display = "wrong header: {}", _0)]
     WrongHeader(String),
     #[fail(display = "inflate failed: {}", _0)]
@@ -373,12 +399,17 @@ impl From<io::Error> for Error {
 }
 impl From<mpsc::error::SendError<ws::Msg>> for Error {
     fn from(e: mpsc::error::SendError<ws::Msg>) -> Self {
-        Error::UpstreamError { error: e }
+        Error::MsgSendError { error: e }
     }
 }
 impl From<mpsc::error::SendError<Vec<u8>>> for Error {
     fn from(e: mpsc::error::SendError<Vec<u8>>) -> Self {
-        Error::ConnError { error: e }
+        Error::RawSendError { error: e }
+    }
+}
+impl From<mpsc::error::SendError<Socket>> for Error {
+    fn from(e: mpsc::error::SendError<Socket>) -> Self {
+        Error::SocketSendError { error: e }
     }
 }
 
@@ -386,16 +417,6 @@ impl From<std::str::Utf8Error> for Error {
     fn from(e: std::str::Utf8Error) -> Self {
         Error::TextPayloadNotValidUTF8(e)
     }
-}
-
-/// Connects to the WebSocket server and on success returns `Socket`.
-pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
-    let log = log.into().unwrap_or(log::null());
-    let (addr, path) = parse_url(url)?;
-    let stream = TcpStream::connect(&addr).await?;
-    let upgrade = http::connect(stream, &addr, &path).await?;
-    let (rx, tx) = ws::handle(upgrade, log.clone()).await;
-    Ok(Socket { no: 1, rx: rx, tx: tx })
 }
 
 fn parse_url(u: &str) -> Result<(String, String), Error> {

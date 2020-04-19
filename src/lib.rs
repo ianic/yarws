@@ -1,5 +1,5 @@
 //! WebSocket server and client implementation.  
-//! Based on tokio runtime.
+//! Based on [Tokio] runtime.
 //!
 //! Per message deflate is implemented for incoming messages. Lib can receive compressed messages.
 //! Currently all outgoing messages are sent uncompressed.
@@ -152,6 +152,7 @@
 //! [wstest]: https://github.com/crossbario/autobahn-testsuite
 //! [autobahn]: https://github.com/crossbario/autobahn-testsuite
 //! [cargo-watch]: https://github.com/passcod/cargo-watch
+//! [Tokio]: https://tokio.rs
 //!
 use slog::Logger;
 use std::str;

@@ -8,9 +8,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
-pub async fn upgrade(stream: TcpStream) -> Result<Upgrade, Error> {
-    let (mut ws_stream, header) = parse_http_headers(stream).await?;
-    if header.is_ws_upgrade() {
+// Accepts http upgrade requests.
+// Parses http headers. Checks weather it is valid WebSocket upgrade request.
+// Responds to client with http upgrade response.
+pub async fn accept(stream: TcpStream) -> Result<Upgrade, Error> {
+    let (mut ws_stream, header) = read_header(stream).await?;
+    if header.is_valid_upgrade() {
         ws_stream.write_all(header.upgrade_response().as_bytes()).await?;
         return Ok(Upgrade {
             stream: ws_stream,
@@ -20,6 +23,23 @@ pub async fn upgrade(stream: TcpStream) -> Result<Upgrade, Error> {
     }
     const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
     ws_stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
+    Err(Error::InvalidUpgradeRequest)
+}
+
+// Connects to the WebScoket server.
+// It will send http upgrade request, wait for response and check wheather upgrade request is accepted.
+pub async fn connect(mut stream: TcpStream, host: &str, path: &str) -> Result<Upgrade, Error> {
+    let key = connect_key();
+    stream.write_all(connect_header(host, path, &key).as_bytes()).await?;
+
+    let (ws_stream, header) = read_header(stream).await?;
+    if header.is_valid_connect(&key) {
+        return Ok(Upgrade {
+            stream: ws_stream,
+            deflate_supported: header.is_deflate_supported(),
+            client: true,
+        });
+    }
     Err(Error::InvalidUpgradeRequest)
 }
 
@@ -40,13 +60,6 @@ struct Header {
     accept: String,
 }
 
-fn split_header_line(line: &str) -> Option<(&str, &str)> {
-    let mut splitter = line.splitn(2, ':');
-    let first = splitter.next()?;
-    let second = splitter.next()?;
-    Some((first, second.trim()))
-}
-
 impl Header {
     fn new() -> Header {
         Header {
@@ -58,15 +71,16 @@ impl Header {
             accept: String::new(),
         }
     }
-    fn parse(&mut self, line: &str) {
+
+    fn append(&mut self, line: &str) {
         if let Some((key, value)) = split_header_line(&line) {
-            match key {
-                "Connection" => self.connection = value.to_string(),
-                "Upgrade" => self.upgrade = value.to_string(),
-                "Sec-WebSocket-Version" => self.version = value.to_string(),
-                "Sec-WebSocket-Key" => self.key = value.to_string(),
-                "Sec-WebSocket-Extensions" => self.add_extensions(value),
-                "Sec-WebSocket-Accept" => self.accept = value.to_string(),
+            match key.to_lowercase().as_str() {
+                "connection" => self.connection = value.to_lowercase(),
+                "upgrade" => self.upgrade = value.to_lowercase(),
+                "sec-websocket-version" => self.version = value.to_string(),
+                "sec-websocket-key" => self.key = value.to_string(),
+                "sec-websocket-extensions" => self.add_extensions(value),
+                "sec-websocket-accept" => self.accept = value.to_string(),
                 //"Host"
                 //"Origin"
                 //_ => println!("other header: '{}' => '{}'", key, value),
@@ -74,21 +88,18 @@ impl Header {
             }
         }
     }
+
     fn add_extensions(&mut self, ex: &str) {
         if !self.extensions.is_empty() {
             self.extensions.push_str(", ");
         }
         self.extensions.push_str(ex);
     }
-    fn is_ws_upgrade(&self) -> bool {
-        self.connection == "Upgrade"
-            && (self.upgrade == "websocket" || self.upgrade == "WebSocket")
-            && self.version == "13"
-            && self.key.len() > 0
-    }
+
     fn is_deflate_supported(&self) -> bool {
         self.extensions.contains("permessage-deflate")
     }
+
     fn upgrade_response(&self) -> String {
         const HEADER: &str = "HTTP/1.1 101 Switching Protocols\r\n\
             Upgrade: websocket\r\n\
@@ -107,14 +118,31 @@ impl Header {
         s.push_str(&"\r\n");
         s
     }
-    fn is_ws_connect(&self, key: &str) -> bool {
+
+    fn is_valid_upgrade(&self) -> bool {
+        self.connection == "upgrade" && self.upgrade == "websocket" && self.version == "13" && self.key.len() > 0
+    }
+
+    fn is_valid_connect(&self, key: &str) -> bool {
         let accept = ws_accept(key);
-        self.connection == "Upgrade"
-            && (self.upgrade == "websocket" || self.upgrade == "WebSocket")
-            && self.accept == accept
+        self.connection == "upgrade" && self.upgrade == "websocket" && self.accept == accept
     }
 }
 
+fn split_header_line(line: &str) -> Option<(&str, &str)> {
+    let mut splitter = line.splitn(2, ':');
+    let key = splitter.next()?;
+    let value = splitter.next()?;
+    Some((key, value.trim()))
+}
+
+// Calculate accept header value from |Sec-WebSocket-Key|.
+// Ref: https://tools.ietf.org/html/rfc6455
+//      The server would append the string "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+//      the value of the |Sec-WebSocket-Key| header field in the client's handshake.
+//      The server would then take the SHA-1 hash of this string.
+//      This value is then base64-encoded, to give the value
+//      which would be returned in the |Sec-WebSocket-Accept| header field.
 fn ws_accept(key: &str) -> String {
     const WS_MAGIC_KEY: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     let mut hasher = Sha1::new();
@@ -125,22 +153,8 @@ fn ws_accept(key: &str) -> String {
     base64::encode(&hr)
 }
 
-pub async fn connect(mut stream: TcpStream, host: &str, path: &str) -> Result<Upgrade, Error> {
-    let key = connect_key();
-    stream.write_all(connect_header(host, path, &key).as_bytes()).await?;
-
-    let (ws_stream, header) = parse_http_headers(stream).await?;
-    if header.is_ws_connect(&key) {
-        return Ok(Upgrade {
-            stream: ws_stream,
-            deflate_supported: header.is_deflate_supported(),
-            client: true,
-        });
-    }
-    Err(Error::InvalidUpgradeRequest)
-}
-
-async fn parse_http_headers(mut stream: TcpStream) -> Result<(TcpStream, Header), Error> {
+// Reads http header from TcpStream.
+async fn read_header(mut stream: TcpStream) -> Result<(TcpStream, Header), Error> {
     let mut header = Header::new();
     let mut line: Vec<u8> = Vec::new();
     loop {
@@ -152,7 +166,7 @@ async fn parse_http_headers(mut stream: TcpStream) -> Result<(TcpStream, Header)
             if line.len() == 0 {
                 break;
             }
-            header.parse(&str::from_utf8(&line)?);
+            header.append(&str::from_utf8(&line)?);
             line = Vec::new();
             continue;
         }
@@ -161,6 +175,7 @@ async fn parse_http_headers(mut stream: TcpStream) -> Result<(TcpStream, Header)
     Ok((stream, header))
 }
 
+// Http header for client upgrade request to the WebScoket server.
 fn connect_header(host: &str, path: &str, key: &str) -> String {
     let mut h = "GET ".to_owned()
         + path
@@ -178,6 +193,7 @@ Sec-WebSocket-Key: ";
     h
 }
 
+// Creates random key for |Sec-WebSocket-Key| http header used in client connections.
 fn connect_key() -> String {
     let buf = rand::thread_rng().gen::<[u8; 16]>();
     base64::encode(&buf)
@@ -195,26 +211,54 @@ mod tests {
     }
     #[test]
     fn test_ws_accept() {
-        // example from the ws rfc: https://tools.ietf.org/html/rfc6455
-        /* NOTE: As an example, if the value of the |Sec-WebSocket-Key| header
-        field in the client's handshake were "dGhlIHNhbXBsZSBub25jZQ==", the
-        server would append the string "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-        to form the string "dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-
-        C5AB0DC85B11".  The server would then take the SHA-1 hash of this
-        string, giving the value 0xb3 0x7a 0x4f 0x2c 0xc0 0x62 0x4f 0x16 0x90
-        0xf6 0x46 0x06 0xcf 0x38 0x59 0x45 0xb2 0xbe 0xc4 0xea.  This value
-        is then base64-encoded, to give the value
-        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", which would be returned in the
-        |Sec-WebSocket-Accept| header field.
-        */
         let acc = ws_accept("dGhlIHNhbXBsZSBub25jZQ==");
         assert_eq!(acc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
     #[test]
-    fn ws_key() {
+    fn test_connect_header() {
         let k = connect_key();
-        println!("key {}", k);
-        //println!("{}", connect_header(&k, "minus5.hr"));
+        assert_eq!(24, k.len());
+        let ch = connect_header("minus5.hr", "/ws", "mRfknYOIooirQK3OuKf54A==");
+        assert_eq!(
+            ch,
+            "GET /ws HTTP/1.1\r\n\
+Connection: Upgrade\r\n\
+Upgrade: websocket\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\
+Sec-WebSocket-Key: mRfknYOIooirQK3OuKf54A==\r\n\
+Host: minus5.hr\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn test_parse_header() {
+        test_parse_header_asserts(
+            "GET /chat HTTP/1.1
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13",
+        );
+        test_parse_header_asserts(
+            "GET /chat HTTP/1.1
+upgrade: websocket
+coNNection: Upgrade
+sec-webSocket-key: dGhlIHNhbXBsZSBub25jZQ==
+sec-WEBSocket-VerSion: 13",
+        );
+    }
+
+    fn test_parse_header_asserts(req: &str) {
+        let mut header = Header::new();
+        for line in req.lines() {
+            header.append(line);
+        }
+        assert!(header.is_valid_upgrade());
+        assert_eq!(header.connection, "upgrade");
+        assert_eq!(header.upgrade, "websocket");
+        assert_eq!(header.key, "dGhlIHNhbXBsZSBub25jZQ==");
+        assert_eq!(header.version, "13");
     }
 }

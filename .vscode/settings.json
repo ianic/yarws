@@ -4,5 +4,12 @@
         "Cargo.lock": true,
         "LICENSE": true,
         "autobahn/reports": true,
-    }
+    },
+    "spellright.language": [
+        "en"
+    ],
+    "spellright.documentTypes": [
+        "markdown",
+        "latex"
+    ]
 }

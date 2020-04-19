@@ -13,8 +13,10 @@
 //! ```
 //! let mut srv = yarws::Server::bind("127.0.0.1:9001", None).await?;
 //! while let Some(socket) = srv.accept().await {
-//!     while let Some(msg) = socket.recv().await {
-//!         socket.send(msg).await?;
+//!     spawn(async move {
+//!         while let Some(msg) = socket.recv().await {
+//!             socket.send(msg).await.unwrap();
+//!         }
 //!     }
 //! }
 //! ```
@@ -38,7 +40,7 @@
 //! For the complete echo client example refer to [src/bin/echo_client.rs].
 //!
 //!
-//! # Usage
+//! # Testing
 //! Run client with external echo server.   
 //! ```shell
 //! cargo run --bin client -- ws://echo.websocket.org
@@ -180,12 +182,6 @@ pub mod log;
 mod ws;
 
 /// Represent a WebSocket connection. Used for sending and receiving messages.  
-///
-/// For reading incoming messages loop over recv() method while it returns
-/// Some<Msg>. None means that underlying WebSocket connection is closed.  
-///
-/// For sending messages use send() method. It will return Error in the case
-/// when underlying connection is closed, otherwise it will succeed.
 #[derive(Debug)]
 pub struct Socket {
     pub no: usize,
@@ -194,22 +190,111 @@ pub struct Socket {
 }
 
 impl Socket {
+    /// Receives Msg from the other side of the Socket connection.
+    /// None is returned if the socket is closed.
+    ///
+    /// # Examples
+    ///
+    /// Usually used in while loop:
+    /// ```
+    /// while let Some(msg) = socket.recv().await {
+    ///     // process msg
+    /// }
+    /// ```
     pub async fn recv(&mut self) -> Option<Msg> {
         loop {
             match self.rx.recv().await {
                 None => return None, // channel exhausted
-                Some(m) => {
-                    let opt_msg = m.into_msg();
-                    match opt_msg {
-                        None => continue, // skip control message type
-                        _ => return opt_msg,
-                    }
-                }
+                Some(m) => match m.into_msg() {
+                    None => continue, // skip control message type
+                    Some(msg) => return Some(msg),
+                },
             }
         }
     }
 
-    pub async fn recv_text(&mut self) -> Option<String> {
+    /// Sends Msg to the other side of the Socket connection.
+    /// Errors if the socket is already closed.
+    ///
+    /// # Examples
+    /// Echo example.
+    /// Receive Msgs and replay with the same Msg.
+    /// ```
+    /// async fn echo(mut socket: Socket) -> Result<(), Error> {
+    ///     while let Some(msg) = socket.recv().await {
+    ///         socket.send(msg).await?;
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn send(&mut self, msg: Msg) -> Result<(), Error> {
+        self.tx.send(msg.into_ws_msg()).await?;
+        Ok(())
+    }
+
+    /// Transforms Socket into pair of mpsc channels for sending/receiving Msgs.
+    ///
+    /// In some cases it is more convenient to have channels instead of calling
+    /// methods. Ownership of each side of the channel can be moved to the
+    /// different function.
+    pub async fn into_channel(self) -> (Sender<Msg>, Receiver<Msg>) {
+        let (tx, mut i_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+        let (mut i_tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+
+        let mut ws_rx = self.rx;
+        spawn(async move {
+            while let Some(ws_msg) = ws_rx.recv().await {
+                if let Some(msg) = ws_msg.into_msg() {
+                    if let Err(_) = i_tx.send(msg).await {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut ws_tx = self.tx;
+        spawn(async move {
+            while let Some(msg) = i_rx.recv().await {
+                if let Err(_) = ws_tx.send(msg.into_ws_msg()).await {
+                    break;
+                }
+            }
+        });
+
+        (tx, rx)
+    }
+
+    /// Transforms Socket into TextSocket which is more convenient for handling
+    /// text only messages.
+    pub fn into_text(self) -> TextSocket {
+        TextSocket {
+            no: self.no,
+            tx: self.tx,
+            rx: self.rx,
+        }
+    }
+}
+
+/// Represent a WebSocket connection. Used for sending and receiving text only
+/// messages.
+///
+/// Each incoming message is transformed into String. Eventual other types of the
+/// messages (binary) are ignored.
+pub struct TextSocket {
+    pub no: usize,
+    tx: Sender<ws::Msg>,
+    rx: Receiver<ws::Msg>,
+}
+
+impl TextSocket {
+    pub async fn send(&mut self, text: &str) -> Result<(), Error> {
+        self.tx.send(ws::Msg::Text(text.to_owned())).await?;
+        Ok(())
+    }
+
+    /// Receives String from the other side of the Socket connection.
+    /// None is returned if the socket is closed.
+    pub async fn recv(&mut self) -> Option<String> {
         loop {
             match self.rx.recv().await {
                 None => return None,
@@ -221,24 +306,17 @@ impl Socket {
         }
     }
 
-    pub async fn must_recv_text(&mut self) -> Result<String, Error> {
-        match self.recv_text().await {
+    /// Sends String to the other side of the Socket connection.
+    /// Errors if the socket is already closed.
+    pub async fn recv_one(&mut self) -> Result<String, Error> {
+        match self.recv().await {
             None => Err(Error::SocketClosed),
             Some(v) => Ok(v),
         }
     }
 
-    pub async fn send(&mut self, msg: Msg) -> Result<(), Error> {
-        self.tx.send(msg.into_ws_msg()).await?;
-        Ok(())
-    }
-
-    pub async fn send_text(&mut self, text: &str) -> Result<(), Error> {
-        self.tx.send(ws::Msg::Text(text.to_owned())).await?;
-        Ok(())
-    }
-
-    pub async fn into_text_chan(self) -> (Sender<String>, Receiver<String>) {
+    /// Transforms Socket into pair of mpsc channels for sending/receiving Strings.
+    pub async fn into_channel(self) -> (Sender<String>, Receiver<String>) {
         let (tx, mut i_rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
         let (mut i_tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
 

@@ -13,7 +13,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args = Args::from_args();
-    let mut socket = connect(&args.url, None).await?;
+    let mut socket = connect(&args.url, None).await?.into_text();
 
     let data = "01234567890abcdefghijklmnopqrstuvwxyz"; //36 characters
     let sizes = vec![1, 36, 125, 126, 127, 65535, 65536, 65537, 1048576];
@@ -21,8 +21,8 @@ async fn main() -> Result<(), Error> {
         let rep = size / data.len() + 1;
         let req = &data.repeat(rep)[0..size];
 
-        socket.send_text(req).await?;
-        let rsp = socket.must_recv_text().await?;
+        socket.send(req).await?;
+        let rsp = socket.recv_one().await?;
         assert_eq!(req, rsp);
     }
     Ok(())

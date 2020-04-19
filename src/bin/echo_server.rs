@@ -1,5 +1,6 @@
 use structopt::StructOpt;
 use tokio;
+use tokio::spawn;
 use yarws::{log, Error, Msg, Server, Socket};
 
 #[macro_use]
@@ -40,18 +41,21 @@ async fn main() {
 
 async fn run(args: &Args, log: slog::Logger) -> Result<(), Error> {
     let mut srv = Server::bind(&args.addr(), log.clone()).await?;
+    let reverse = args.reverse;
     while let Some(socket) = srv.accept().await {
         let log = log.new(o!("conn" => socket.no));
-        if args.reverse {
-            if let Err(e) = reverse_echo(socket).await {
-                error!(log, "{}", e);
-            }
-        } else {
-            if let Err(e) = echo(socket).await {
-                error!(log, "{}", e);
-            }
-        };
-        trace!(log, "socket closed");
+        spawn(async move {
+            if reverse {
+                if let Err(e) = reverse_echo(socket).await {
+                    error!(log, "{}", e);
+                }
+            } else {
+                if let Err(e) = echo(socket).await {
+                    error!(log, "{}", e);
+                }
+            };
+            trace!(log, "socket closed");
+        });
     }
     Ok(())
 }

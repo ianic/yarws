@@ -1,9 +1,14 @@
 [package]
 name = "yarws"
+version = "0.1.1"
 description = "Yet Another Rust WebSocket library"
-version = "0.1.0"
 authors = ["Igor Anic <igor.anic@gmail.com>"]
 repository = "https://github.com/ianic/yarws"
+homepage = "https://github.com/ianic/yarws"
+documentation = "https://docs.rs/yarws/0.1.1"
+readme = "README.md"
+categories = ["web-programming::websocket", "network-programming"]
+keywords = ["websocket", "tokio"]
 license = "MIT"
 edition = "2018"
 

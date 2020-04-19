@@ -26,8 +26,8 @@ pub async fn accept(stream: TcpStream) -> Result<Upgrade, Error> {
     Err(Error::InvalidUpgradeRequest)
 }
 
-// Connects to the WebScoket server.
-// It will send http upgrade request, wait for response and check wheather upgrade request is accepted.
+// Connects to the WebSocket server.
+// It will send http upgrade request, wait for response and check whether upgrade request is accepted.
 pub async fn connect(mut stream: TcpStream, host: &str, path: &str) -> Result<Upgrade, Error> {
     let key = connect_key();
     stream.write_all(connect_header(host, path, &key).as_bytes()).await?;
@@ -81,9 +81,6 @@ impl Header {
                 "sec-websocket-key" => self.key = value.to_string(),
                 "sec-websocket-extensions" => self.add_extensions(value),
                 "sec-websocket-accept" => self.accept = value.to_string(),
-                //"Host"
-                //"Origin"
-                //_ => println!("other header: '{}' => '{}'", key, value),
                 _ => (),
             }
         }
@@ -175,7 +172,7 @@ async fn read_header(mut stream: TcpStream) -> Result<(TcpStream, Header), Error
     Ok((stream, header))
 }
 
-// Http header for client upgrade request to the WebScoket server.
+// Http header for client upgrade request to the WebSocket server.
 fn connect_header(host: &str, path: &str, key: &str) -> String {
     let mut h = "GET ".to_owned()
         + path

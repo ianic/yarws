@@ -1,7 +1,7 @@
 # yarws
 
 WebSocket protocol implementation based on [Tokio] runtime. For building
-WebSocket server or clients.
+WebSocket server or client.
 
 yarws = Yet Another Rust WebSocket library
 

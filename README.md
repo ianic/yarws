@@ -31,7 +31,7 @@ First line starts listening for WebSocket connections on an ip:port.
 Each client is represented by [`Socket`] returned from [`accept`].
 For each client we are looping while messages arrive and replying with the
 same message.
-For the complete echo server example refer to [src/bin/echo_server.rs].
+For the complete echo server example please take a look at [examples/echo_server.rs].
 
 ### Client:
 ```rust
@@ -45,13 +45,14 @@ This is example of an echo client.
 messages.
 Looping on recv returns each incoming message until socket is closed.
 Here in loop we reply with the same message.
-For the complete echo client example refer to [src/bin/echo_client.rs].
+For the complete client example refer to [examples/client.rs].
+
 
 
 ## Testing
 Run client with external echo server.
 ```shell
-cargo run --bin client -- ws://echo.websocket.org
+cargo run --example client -- ws://echo.websocket.org
 ```
 Client will send few messages of different sizes and expect to get the same
 in return.
@@ -59,11 +60,11 @@ If everything went fine will finish without error.
 
 To run same client on our server. First start server:
 ```shell
-cargo run --bin echo_server
+cargo run --example echo_server
 ```
 Then in other terminal run client:
 ```shell
-cargo run --bin client
+cargo run --example client
 ```
 If it is in trace log mode server will log type and size of every message it
 receives.
@@ -72,7 +73,7 @@ receives.
 You can use [websocat] to connect to the server and test communication.
 First start server:
 ```shell
-cargo run --bin echo_server
+cargo run --example echo_server
 ```
 Then in other terminal run websocat:
 ```shell
@@ -162,8 +163,8 @@ You can disconnect from the server with: `socket.close();`.
 
 [`Socket`]: struct.Socket.html
 [`accept`]: struct.Server.html#method.accept
-[src/bin/echo_client.rs]: https://github.com/ianic/yarws/blob/master/src/bin/echo_client.rs
-[src/bin/echo_server.rs]: https://github.com/ianic/yarws/blob/master/src/bin/echo_server.rs
+[examples/client.rs]: https://github.com/ianic/yarws/blob/master/examples/client.rs
+[examples/echo_server.rs]: https://github.com/ianic/yarws/blob/master/examples/echo_server.rs
 [websocat]: https://github.com/vi/websocat
 [wstest]: https://github.com/crossbario/autobahn-testsuite
 [autobahn]: https://github.com/crossbario/autobahn-testsuite

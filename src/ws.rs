@@ -169,7 +169,7 @@ impl Reader {
         if l > 0 {
             let mut buf = vec![0u8; l];
             self.stream_rx.read_exact(&mut buf).await?;
-            frame.set_payload(buf.to_vec());
+            frame.set_payload(buf);
         }
         Ok(())
     }

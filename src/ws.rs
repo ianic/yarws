@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Debug)]
-// Message for communitacion whith upstream part of the library.
+// Message for communication with upstream part of the library.
 pub enum Msg {
     Binary(Vec<u8>),
     Text(String),
@@ -82,10 +82,11 @@ pub async fn start(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sende
     let writer_tx = Writer::spawn(stream_tx, mask_frames, log.clone()); // handle write half
     let socket_rx = Reader::spawn(stream_rx, writer_tx.clone(), deflate_supported, log); // handle read half
 
-    (socket_rx, writer_tx) // channel for communication with the upstream part of the library
+    (socket_rx, writer_tx) // channel for communication with the upstream part
+                           // of the library
 }
 
-// Writes byteas to the outbound tcp stream.
+// Writes bytes to the outbound tcp stream.
 struct Writer {}
 
 impl Writer {
@@ -108,7 +109,8 @@ impl Writer {
                             if n == raw.len() {
                                 break; // done everything is written
                             }
-                            raw = &raw[n..]; // resize, remove written leave unwritten and try again
+                            raw = &raw[n..]; // resize, remove written leave
+                                             // unwritten and try again
                         }
                     }
                 }
@@ -124,9 +126,9 @@ impl Writer {
 }
 
 // Reads bytes from the ReadHalf of the TcpStream.
-// Parses bytes as WebSocket frames, validates frame rules. Convers frames to
+// Parses bytes as WebSocket frames, validates frame rules. Converts frames to
 // the Msg for communication with the application. Emits Msgs to the application
-// (tx channel), and in the case of controll messages directly to the other side
+// (tx channel), and in the case of control messages directly to the other side
 // of WebSocket (control_tx channel).
 struct Reader {
     deflate_supported: bool,
@@ -148,7 +150,7 @@ impl Reader {
         let mut reader = Reader {
             deflate_supported: deflate_supported,
             stream_rx: stream_rx,
-            tx: tx,                 // otuput of the messages to the application
+            tx: tx,                 // output of the messages to the application
             control_tx: control_tx, // signal for the write loop that reader is closed
             log: log,
             header_buf: [0u8; 14],
@@ -405,7 +407,8 @@ impl Frame {
                 return Err(Error::WrongHeader("fragmented control frame".to_owned()));
             }
         } else {
-            // continuation (waiting for more fragments) frames must be in order start/middle.../end
+            // continuation (waiting for more fragments) frames must be in order
+            // start/middle.../end
             if !in_continuation && self.opcode.continuation() {
                 return Err(Error::WrongHeader("not in continuation".to_owned()));
             }
@@ -455,8 +458,8 @@ impl Frame {
         !(self.fin && !self.opcode.continuation())
     }
 
-    // if frame is part of the fragmented message it is appended to the current fragment
-    // returns frame, and fragment
+    // if frame is part of the fragmented message it is appended to the current
+    // fragment returns frame, and fragment
     // if frame is None it is not completed
     fn into_fragment(self, fragment: Option<Frame>) -> (Option<Frame>, Option<Frame>) {
         match self.fragment() {
@@ -482,7 +485,8 @@ impl Frame {
         let bytes: [u8; 2] = [self.payload[0], self.payload[1]];
         let status = u16::from_be_bytes(bytes);
         match status {
-            1000 | 1001 | 1002 | 1003 | 1007 | 1008 | 1009 | 1010 | 1011 => status, // valid status code, reply with that code
+            1000 | 1001 | 1002 | 1003 | 1007 | 1008 | 1009 | 1010 | 1011 => status, /* valid status code, reply with */
+            // that code
             _ => 0, // for all other reply with close frame without payload
         }
     }
@@ -513,8 +517,8 @@ impl Frame {
 //The same algorithm applies regardless of the direction of the translation,
 //e.g., the same steps are applied to ask the data as to unmask the data.
 fn mask(mut payload: Vec<u8>, key: [u8; 4]) -> Vec<u8> {
-    // loop through the octets of ENCODED and XOR the octet with the (i modulo 4)th octet of MASK
-    // ref: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers
+    // loop through the octets of ENCODED and XOR the octet with the (i modulo 4)th
+    // octet of MASK ref: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers
     for (i, b) in payload.iter_mut().enumerate() {
         *b = *b ^ key[i % 4];
     }

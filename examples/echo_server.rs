@@ -27,7 +27,7 @@ async fn main() -> Result<(), Error> {
     let log = log::config();
 
     // bind to tcp port
-    let mut srv = bind(args.addr(), log.clone()).await?;
+    let mut srv = bind(&args.addr(), log.clone()).await?;
     // wait for incoming connection
     while let Some(socket) = srv.accept().await {
         let log = log.new(o!("conn" => socket.no));

@@ -14,7 +14,7 @@
 //! # Examples
 //!
 //! ## Server:
-//! ```
+//! ```no-run
 //! let mut srv = yarws::bind("127.0.0.1:9001", None).await?;
 //! while let Some(socket) = srv.accept().await {
 //!     tokio::spawn(async move {
@@ -34,7 +34,7 @@
 //! [examples/echo_server.rs].
 //!
 //! ## Client:
-//! ```
+//! ```no-run
 //! let mut socket = yarws::connect("ws://127.0.0.1:9001", None).await?;
 //! while let Some(msg) = socket.recv().await {
 //!     socket.send(msg).await?;
@@ -237,7 +237,7 @@ impl Socket {
     /// # Examples
     ///
     /// Usually used in while loop:
-    /// ```
+    /// ```no-run
     /// while let Some(msg) = socket.recv().await {
     ///     // process msg
     /// }
@@ -260,7 +260,7 @@ impl Socket {
     /// # Examples
     /// Echo example.
     /// Receive Msgs and replay with the same Msg.
-    /// ```
+    /// ```no-run
     /// async fn echo(mut socket: Socket) -> Result<(), Error> {
     ///     while let Some(msg) = socket.recv().await {
     ///         socket.send(msg).await?;

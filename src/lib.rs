@@ -3,6 +3,7 @@
 //!
 //! yarws = Yet Another Rust WebSocket library
 //!
+//! Tls (wss:// enpoints) are supported in connect (since version 0.2.0).
 //!
 //! Lib is passing all [autobahn] tests. Including those for compressed
 //! messages. Per message deflate is implemented for incoming messages. Lib can

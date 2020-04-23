@@ -5,6 +5,7 @@ WebSocket server or client.
 
 yarws = Yet Another Rust WebSocket library
 
+Tls (wss:// enpoints) are supported in connect (since version 0.2.0).
 
 Lib is passing all [autobahn] tests. Including those for compressed
 messages. Per message deflate is implemented for incoming messages. Lib can
@@ -31,7 +32,8 @@ First line starts listening for WebSocket connections on an ip:port.
 Each client is represented by [`Socket`] returned from [`accept`].
 For each client we are looping while messages arrive and replying with the
 same message.
-For the complete echo server example please take a look at [examples/echo_server.rs].
+For the complete echo server example please take a look at
+[examples/echo_server.rs].
 
 ### Client:
 ```rust
@@ -170,6 +172,5 @@ You can disconnect from the server with: `socket.close();`.
 [autobahn]: https://github.com/crossbario/autobahn-testsuite
 [cargo-watch]: https://github.com/passcod/cargo-watch
 [Tokio]: https://tokio.rs
-
 
 License: MIT

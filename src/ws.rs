@@ -1,5 +1,4 @@
 use super::Error;
-use crate::http;
 use inflate::inflate_bytes;
 use rand::Rng;
 use slog::Logger;
@@ -7,7 +6,6 @@ use std::fmt;
 use std::str;
 use tokio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::spawn;
 use tokio::sync::mpsc;
@@ -73,14 +71,18 @@ impl Msg {
     }
 }
 
-pub async fn start(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sender<Msg>) {
+pub async fn start<T>(
+    stream: T,
+    mask_frames: bool,
+    deflate_supported: bool,
+    log: Logger,
+) -> (Receiver<Msg>, Sender<Msg>)
+where
+    T: AsyncWriteExt + AsyncReadExt + std::marker::Send + 'static,
+{
     trace!(log, "open");
-
-    let mask_frames = upgrade.client;
-    let deflate_supported = upgrade.deflate_supported;
-
     // Note: rx receive end, tx transmit end
-    let (stream_rx, stream_tx) = io::split(upgrade.stream); // split incoming TcpStream into read and write half
+    let (stream_rx, stream_tx) = io::split(stream); // split incoming TcpStream into read and write half
     let (app_tx, ctl_tx) = Writer::spawn(stream_tx, mask_frames, log.clone()); // handle write half
     let socket_rx = Reader::spawn(stream_rx, ctl_tx, deflate_supported, log); // handle read half
 
@@ -89,18 +91,20 @@ pub async fn start(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sende
 }
 
 // Writes bytes to the outbound tcp stream.
-struct Writer {
-    stream_tx: WriteHalf<TcpStream>,
+struct Writer<T>
+where
+    T: AsyncWriteExt + std::marker::Send,
+{
+    stream_tx: WriteHalf<T>,
     mask_frames: bool,
     app_rx: Receiver<Msg>,
     ctrl_rx: Receiver<Msg>,
 }
 
-impl Writer {
-    fn spawn(stream_tx: WriteHalf<TcpStream>, mask_frames: bool, log: Logger) -> (Sender<Msg>, Sender<Msg>) {
+impl<T: AsyncWriteExt + std::marker::Send + 'static> Writer<T> {
+    fn spawn(stream_tx: WriteHalf<T>, mask_frames: bool, log: Logger) -> (Sender<Msg>, Sender<Msg>) {
         let (app_tx, app_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
         let (ctrl_tx, ctrl_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
-
         spawn(async move {
             let mut writer = Writer {
                 stream_tx: stream_tx,
@@ -164,18 +168,21 @@ impl Writer {
 // the Msg for communication with the application. Emits Msgs to the application
 // (tx channel), and in the case of control messages directly to the other side
 // of WebSocket (control_tx channel).
-struct Reader {
+struct Reader<T>
+where
+    T: AsyncReadExt + std::marker::Send,
+{
     deflate_supported: bool,
-    stream_rx: ReadHalf<TcpStream>,
+    stream_rx: ReadHalf<T>,
     control_tx: Sender<Msg>,
     tx: Sender<Msg>,
     log: slog::Logger,
     header_buf: [u8; 14],
 }
 
-impl Reader {
+impl<T: AsyncReadExt + std::marker::Send + 'static> Reader<T> {
     fn spawn(
-        stream_rx: ReadHalf<TcpStream>,
+        stream_rx: ReadHalf<T>,
         control_tx: Sender<Msg>,
         deflate_supported: bool,
         log: slog::Logger,

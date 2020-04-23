@@ -1,11 +1,11 @@
 [package]
 name = "yarws"
-version = "0.1.2"
+version = "0.2.0"
 description = "Yet Another Rust WebSocket library"
 authors = ["Igor Anic <igor.anic@gmail.com>"]
 repository = "https://github.com/ianic/yarws"
 homepage = "https://github.com/ianic/yarws"
-documentation = "https://docs.rs/yarws/0.1.2"
+documentation = "https://docs.rs/yarws/0.2.0"
 readme = "README.md"
 categories = ["web-programming::websocket", "network-programming"]
 keywords = ["websocket", "tokio"]
@@ -28,7 +28,7 @@ slog-term = "2.5.0"
 slog-async = "2.5.0"
 slog-stdlog = "4.0.0"
 failure = "0.1.7"
-structopt = "0.3.13"
+structopt = "0.3.14"
 rand = "0.7.3"
 url = "2.1.1"
 serde = { version = "1.0.106", features = ["derive"] }

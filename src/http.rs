@@ -11,31 +11,32 @@ use tokio::prelude::*;
 // Accepts http upgrade requests.
 // Parses http headers. Checks weather it is valid WebSocket upgrade request.
 // Responds to client with http upgrade response.
-pub async fn accept(stream: TcpStream) -> Result<Upgrade, Error> {
-    let (mut ws_stream, header) = read_header(stream).await?;
+pub async fn accept(mut stream: TcpStream) -> Result<Upgrade, Error> {
+    let header = read_header(&mut stream).await?;
     if header.is_valid_upgrade() {
-        ws_stream.write_all(header.upgrade_response().as_bytes()).await?;
+        stream.write_all(header.upgrade_response().as_bytes()).await?;
         return Ok(Upgrade {
-            stream: ws_stream,
+            stream: stream,
             deflate_supported: header.is_deflate_supported(),
             client: false,
         });
     }
     const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
-    ws_stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
+    stream.write_all(BAD_REQUEST_HTTP_RESPONSE).await?;
     Err(Error::InvalidUpgradeRequest)
 }
 
 // Connects to the WebSocket server.
-// It will send http upgrade request, wait for response and check whether upgrade request is accepted.
+// It will send http upgrade request, wait for response and check whether
+// upgrade request is accepted.
 pub async fn connect(mut stream: TcpStream, host: &str, path: &str) -> Result<Upgrade, Error> {
     let key = connect_key();
     stream.write_all(connect_header(host, path, &key).as_bytes()).await?;
 
-    let (ws_stream, header) = read_header(stream).await?;
+    let header = read_header(&mut stream).await?;
     if header.is_valid_connect(&key) {
         return Ok(Upgrade {
-            stream: ws_stream,
+            stream: stream,
             deflate_supported: header.is_deflate_supported(),
             client: true,
         });
@@ -135,11 +136,12 @@ fn split_header_line(line: &str) -> Option<(&str, &str)> {
 
 // Calculate accept header value from |Sec-WebSocket-Key|.
 // Ref: https://tools.ietf.org/html/rfc6455
-//      The server would append the string "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-//      the value of the |Sec-WebSocket-Key| header field in the client's handshake.
-//      The server would then take the SHA-1 hash of this string.
-//      This value is then base64-encoded, to give the value
-//      which would be returned in the |Sec-WebSocket-Accept| header field.
+//
+// The server would append the string "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" the
+// value of the |Sec-WebSocket-Key| header field in the client's handshake. The
+// server would then take the SHA-1 hash of this string. This value is then
+// base64-encoded, to give the value which would be returned in the
+// |Sec-WebSocket-Accept| header field.
 fn ws_accept(key: &str) -> String {
     const WS_MAGIC_KEY: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     let mut hasher = Sha1::new();
@@ -151,7 +153,7 @@ fn ws_accept(key: &str) -> String {
 }
 
 // Reads http header from TcpStream.
-async fn read_header(mut stream: TcpStream) -> Result<(TcpStream, Header), Error> {
+async fn read_header(stream: &mut TcpStream) -> Result<Header, Error> {
     let mut header = Header::new();
     let mut line: Vec<u8> = Vec::new();
     loop {
@@ -169,7 +171,7 @@ async fn read_header(mut stream: TcpStream) -> Result<(TcpStream, Header), Error
         }
         line.push(byte);
     }
-    Ok((stream, header))
+    Ok(header)
 }
 
 // Http header for client upgrade request to the WebSocket server.
@@ -190,7 +192,8 @@ Sec-WebSocket-Key: ";
     h
 }
 
-// Creates random key for |Sec-WebSocket-Key| http header used in client connections.
+// Creates random key for |Sec-WebSocket-Key| http header used in client
+// connections.
 fn connect_key() -> String {
     let buf = rand::thread_rng().gen::<[u8; 16]>();
     base64::encode(&buf)

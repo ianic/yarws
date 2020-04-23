@@ -1,9 +1,7 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-
-## [0.2.0]
+## [0.2.0] - 2020-04-23
 ### Added:
 - Tls in connect. It is now possible to connect to the wss:// endpoints. Thanks to [mcseemk](https://www.reddit.com/r/rust/comments/g4zoip/ann_yet_another_rust_websocket_library_yarws/) for pointing  that.
 
@@ -14,6 +12,7 @@ All notable changes to this project will be documented in this file.
 ## [0.1.2] - 2020-04-19
 Initial crate release.
 
+## [Unreleased]
 
 ## Notes
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

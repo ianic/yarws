@@ -179,7 +179,6 @@ use tokio::spawn;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use url::Url;
 
 #[macro_use]
 extern crate slog;
@@ -210,9 +209,14 @@ pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<S
 /// Connects to the WebSocket server and on success returns `Socket`.
 pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
     let log = log.into().unwrap_or(log::null());
-    let (addr, path, _) = parse_url(url)?;
-    let stream = TcpStream::connect(&addr).await?; // establish tcp connection
-    let upgrade = http::connect(stream, &addr, &path).await?; // upgrade it from http to WebSocket
+    let url = parse_url(url)?;
+    let stream = TcpStream::connect(&url.addr).await?; // establish tcp connection
+    if url.wss {
+        let upgrade = http::connect_tls(stream, url).await?; // upgrade it from http to WebSocket
+        let (rx, tx) = ws::start(upgrade.stream, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
+        return Ok(Socket { no: 1, rx: rx, tx: tx });
+    }
+    let upgrade = http::connect(stream, url).await?; // upgrade it from http to WebSocket
     let (rx, tx) = ws::start(upgrade.stream, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
     Ok(Socket { no: 1, rx: rx, tx: tx })
 }
@@ -513,11 +517,18 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
-fn parse_url(u: &str) -> Result<(String, String, bool), Error> {
-    let url = match match Url::parse(u) {
+pub struct Url {
+    addr: String,
+    path: String,
+    domain: String,
+    wss: bool,
+}
+
+fn parse_url(u: &str) -> Result<Url, Error> {
+    let url = match match url::Url::parse(u) {
         Err(url::ParseError::RelativeUrlWithoutBase) => {
             let url = "ws://".to_owned() + u;
-            Url::parse(&url)
+            url::Url::parse(&url)
         }
         other => other,
     } {
@@ -533,7 +544,14 @@ fn parse_url(u: &str) -> Result<(String, String, bool), Error> {
         Some(q) => format!("{}?{}", url.path(), q),
         None => url.path().to_owned(),
     };
-    Ok((addr, path, url.scheme() == "wss"))
+    let wss = url.scheme() == "wss";
+    let u = Url {
+        wss: wss,
+        addr: addr,
+        path: path,
+        domain: host.to_owned(),
+    };
+    Ok(u)
 }
 
 #[cfg(test)]
@@ -541,34 +559,40 @@ mod tests {
     use super::*;
     #[test]
     fn test_parse_url() {
-        let (addr, path, scheme) = parse_url("ws://localhost:9001/path?pero=zdero").unwrap();
-        assert_eq!("localhost:9001", addr);
-        assert_eq!("/path?pero=zdero", path);
-        assert!(!scheme);
+        let url = parse_url("ws://localhost:9001/path?pero=zdero").unwrap();
+        assert_eq!("localhost:9001", url.addr);
+        assert_eq!("/path?pero=zdero", url.path);
+        assert!(!url.wss);
 
-        let (addr, path, scheme) = parse_url("ws://localhost:9001/path").unwrap();
-        assert_eq!("localhost:9001", addr);
-        assert_eq!("/path", path);
-        assert!(!scheme);
+        let url = parse_url("ws://localhost:9001/path").unwrap();
+        assert_eq!("localhost:9001", url.addr);
+        assert_eq!("/path", url.path);
+        assert!(!url.wss);
 
-        let (addr, path, scheme) = parse_url("ws://localhost/path").unwrap();
-        assert_eq!("localhost:80", addr);
-        assert_eq!("/path", path);
-        assert!(!scheme);
+        let url = parse_url("ws://localhost/path").unwrap();
+        assert_eq!("localhost:80", url.addr);
+        assert_eq!("/path", url.path);
+        assert!(!url.wss);
 
-        let (addr, path, scheme) = parse_url("localhost/path").unwrap();
-        assert_eq!("localhost:80", addr);
-        assert_eq!("/path", path);
-        assert!(!scheme);
+        let url = parse_url("localhost/path").unwrap();
+        assert_eq!("localhost:80", url.addr);
+        assert_eq!("/path", url.path);
+        assert!(!url.wss);
 
-        let (addr, path, scheme) = parse_url("pero://localhost/path").unwrap();
-        assert_eq!("localhost:0", addr);
-        assert_eq!("/path", path);
-        assert!(!scheme);
+        let url = parse_url("pero://localhost/path").unwrap();
+        assert_eq!("localhost:0", url.addr);
+        assert_eq!("/path", url.path);
+        assert!(!url.wss);
 
-        let (addr, path, scheme) = parse_url("wss://localhost:9001/path").unwrap();
-        assert_eq!("localhost:9001", addr);
-        assert_eq!("/path", path);
-        assert!(scheme);
+        let url = parse_url("wss://localhost:9001/path").unwrap();
+        assert_eq!("localhost:9001", url.addr);
+        assert_eq!("/path", url.path);
+        assert!(url.wss);
+
+        let url = parse_url("wss://echo.websocket.org/path").unwrap();
+        assert_eq!("echo.websocket.org:443", url.addr);
+        assert_eq!("echo.websocket.org", url.domain);
+        assert_eq!("/path", url.path);
+        assert!(url.wss);
     }
 }

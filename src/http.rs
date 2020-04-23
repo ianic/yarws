@@ -1,17 +1,17 @@
-use super::Error;
+use super::{Error, Url};
 use base64;
 use rand::Rng;
 use sha1::{Digest, Sha1};
 use std::str;
 use tokio;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::prelude::*;
+use tokio_tls::TlsStream;
 
 // Accepts http upgrade requests.
 // Parses http headers. Checks weather it is valid WebSocket upgrade request.
 // Responds to client with http upgrade response.
-pub async fn accept(mut stream: TcpStream) -> Result<Upgrade, Error> {
+pub async fn accept(mut stream: TcpStream) -> Result<Upgrade<TcpStream>, Error> {
     let header = read_header(&mut stream).await?;
     if header.is_valid_upgrade() {
         stream.write_all(header.upgrade_response().as_bytes()).await?;
@@ -29,9 +29,11 @@ pub async fn accept(mut stream: TcpStream) -> Result<Upgrade, Error> {
 // Connects to the WebSocket server.
 // It will send http upgrade request, wait for response and check whether
 // upgrade request is accepted.
-pub async fn connect(mut stream: TcpStream, host: &str, path: &str) -> Result<Upgrade, Error> {
+pub async fn connect(mut stream: TcpStream, url: Url) -> Result<Upgrade<TcpStream>, Error> {
     let key = connect_key();
-    stream.write_all(connect_header(host, path, &key).as_bytes()).await?;
+    stream
+        .write_all(connect_header(&url.addr, &url.path, &key).as_bytes())
+        .await?;
 
     let header = read_header(&mut stream).await?;
     if header.is_valid_connect(&key) {
@@ -44,9 +46,33 @@ pub async fn connect(mut stream: TcpStream, host: &str, path: &str) -> Result<Up
     Err(Error::InvalidUpgradeRequest)
 }
 
+pub async fn connect_tls(std_stream: TcpStream, url: Url) -> Result<Upgrade<TlsStream<TcpStream>>, Error> {
+    let key = connect_key();
+
+    let connector = native_tls::TlsConnector::new().unwrap();
+    let connector = tokio_tls::TlsConnector::from(connector);
+    let mut stream = connector.connect(&url.domain, std_stream).await.unwrap();
+
+    stream
+        .write_all(connect_header(&url.addr, &url.path, &key).as_bytes())
+        .await?;
+    let header = read_header(&mut stream).await?;
+    if header.is_valid_connect(&key) {
+        return Ok(Upgrade {
+            stream: stream,
+            deflate_supported: header.is_deflate_supported(),
+            client: true,
+        });
+    }
+    Err(Error::InvalidUpgradeRequest)
+}
+
 #[derive(Debug)]
-pub struct Upgrade {
-    pub stream: TcpStream,
+pub struct Upgrade<T>
+where
+    T: AsyncWriteExt + AsyncReadExt + std::marker::Send,
+{
+    pub stream: T,
     pub deflate_supported: bool,
     pub client: bool,
 }
@@ -153,7 +179,10 @@ fn ws_accept(key: &str) -> String {
 }
 
 // Reads http header from TcpStream.
-async fn read_header(stream: &mut TcpStream) -> Result<Header, Error> {
+async fn read_header<T>(stream: &mut T) -> Result<Header, Error>
+where
+    T: AsyncReadExt + std::marker::Unpin,
+{
     let mut header = Header::new();
     let mut line: Vec<u8> = Vec::new();
     loop {

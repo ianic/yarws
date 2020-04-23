@@ -19,6 +19,7 @@ sha-1 = "0.8.2"
 hex-literal = "0.2.1"
 base64 = "0.12.0"
 tokio = { version = "0.2", features = ["full"] }
+tokio-tls = "0.3.0"
 futures = "0.3"
 inflate = "0.4.5"
 miniz_oxide = "0.3.6"
@@ -33,3 +34,4 @@ url = "2.1.1"
 serde = { version = "1.0.106", features = ["derive"] }
 serde_json = "1.0.51"
 colored = "1.9"
+native-tls = "0.2.4"

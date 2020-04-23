@@ -29,7 +29,8 @@
 //! Each client is represented by [`Socket`] returned from [`accept`].  
 //! For each client we are looping while messages arrive and replying with the
 //! same message.  
-//! For the complete echo server example please take a look at [examples/echo_server.rs].
+//! For the complete echo server example please take a look at
+//! [examples/echo_server.rs].
 //!
 //! ## Client:
 //! ```
@@ -168,7 +169,6 @@
 //! [autobahn]: https://github.com/crossbario/autobahn-testsuite
 //! [cargo-watch]: https://github.com/passcod/cargo-watch
 //! [Tokio]: https://tokio.rs
-//!
 use slog::Logger;
 use std::str;
 use tokio;
@@ -210,10 +210,10 @@ pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<S
 /// Connects to the WebSocket server and on success returns `Socket`.
 pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
     let log = log.into().unwrap_or(log::null());
-    let (addr, path) = parse_url(url)?;
+    let (addr, path, _) = parse_url(url)?;
     let stream = TcpStream::connect(&addr).await?; // establish tcp connection
     let upgrade = http::connect(stream, &addr, &path).await?; // upgrade it from http to WebSocket
-    let (rx, tx) = ws::start(upgrade, log.clone()).await; // start ws
+    let (rx, tx) = ws::start(upgrade.stream, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
     Ok(Socket { no: 1, rx: rx, tx: tx })
 }
 
@@ -314,8 +314,8 @@ impl Socket {
 /// Represent a WebSocket connection. Used for sending and receiving text only
 /// messages.
 ///
-/// Each incoming message is transformed into String. Eventual other types of the
-/// messages (binary) are ignored.
+/// Each incoming message is transformed into String. Eventual other types of
+/// the messages (binary) are ignored.
 pub struct TextSocket {
     pub no: usize,
     tx: Sender<ws::Msg>,
@@ -351,7 +351,8 @@ impl TextSocket {
         }
     }
 
-    /// Transforms Socket into pair of mpsc channels for sending/receiving Strings.
+    /// Transforms Socket into pair of mpsc channels for sending/receiving
+    /// Strings.
     pub async fn into_channel(self) -> (Sender<String>, Receiver<String>) {
         let (tx, mut i_rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
         let (mut i_tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
@@ -387,8 +388,8 @@ impl TextSocket {
 
 /// Message exchanged between library and application.
 ///
-/// Can be text or binary. Text messages are valid UTF-8 strings. Binary of course can be anything.  
-/// Web servers will typically send text messages.
+/// Can be text or binary. Text messages are valid UTF-8 strings. Binary of
+/// course can be anything. Web servers will typically send text messages.
 pub enum Msg {
     Text(String),
     Binary(Vec<u8>),
@@ -452,7 +453,7 @@ async fn spawn_accept(stream: TcpStream, socket_tx: Sender<Socket>, no: usize, l
 // Socket through socket_tx channel.
 async fn accept(stream: TcpStream, mut socket_tx: Sender<Socket>, no: usize, log: Logger) -> Result<(), Error> {
     let upgrade = http::accept(stream).await?;
-    let (rx, tx) = ws::start(upgrade, log).await;
+    let (rx, tx) = ws::start(upgrade.stream, upgrade.client, upgrade.deflate_supported, log).await;
     let socket = Socket { no: no, rx: rx, tx: tx };
     socket_tx.send(socket).await?;
     Ok(())
@@ -512,7 +513,7 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
-fn parse_url(u: &str) -> Result<(String, String), Error> {
+fn parse_url(u: &str) -> Result<(String, String, bool), Error> {
     let url = match match Url::parse(u) {
         Err(url::ParseError::RelativeUrlWithoutBase) => {
             let url = "ws://".to_owned() + u;
@@ -532,7 +533,7 @@ fn parse_url(u: &str) -> Result<(String, String), Error> {
         Some(q) => format!("{}?{}", url.path(), q),
         None => url.path().to_owned(),
     };
-    Ok((addr, path))
+    Ok((addr, path, url.scheme() == "wss"))
 }
 
 #[cfg(test)]
@@ -540,24 +541,34 @@ mod tests {
     use super::*;
     #[test]
     fn test_parse_url() {
-        let (addr, path) = parse_url("ws://localhost:9001/path?pero=zdero").unwrap();
+        let (addr, path, scheme) = parse_url("ws://localhost:9001/path?pero=zdero").unwrap();
         assert_eq!("localhost:9001", addr);
         assert_eq!("/path?pero=zdero", path);
+        assert!(!scheme);
 
-        let (addr, path) = parse_url("ws://localhost:9001/path").unwrap();
+        let (addr, path, scheme) = parse_url("ws://localhost:9001/path").unwrap();
         assert_eq!("localhost:9001", addr);
         assert_eq!("/path", path);
+        assert!(!scheme);
 
-        let (addr, path) = parse_url("ws://localhost/path").unwrap();
+        let (addr, path, scheme) = parse_url("ws://localhost/path").unwrap();
         assert_eq!("localhost:80", addr);
         assert_eq!("/path", path);
+        assert!(!scheme);
 
-        let (addr, path) = parse_url("localhost/path").unwrap();
+        let (addr, path, scheme) = parse_url("localhost/path").unwrap();
         assert_eq!("localhost:80", addr);
         assert_eq!("/path", path);
+        assert!(!scheme);
 
-        let (addr, path) = parse_url("pero://localhost/path").unwrap();
+        let (addr, path, scheme) = parse_url("pero://localhost/path").unwrap();
         assert_eq!("localhost:0", addr);
         assert_eq!("/path", path);
+        assert!(!scheme);
+
+        let (addr, path, scheme) = parse_url("wss://localhost:9001/path").unwrap();
+        assert_eq!("localhost:9001", addr);
+        assert_eq!("/path", path);
+        assert!(scheme);
     }
 }

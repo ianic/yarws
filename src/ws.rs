@@ -53,6 +53,7 @@ impl Msg {
         }
     }
 
+    #[allow(dead_code)]
     fn is_close(&self) -> bool {
         match self {
             Msg::Close(_) => true,
@@ -60,6 +61,7 @@ impl Msg {
         }
     }
 
+    #[allow(dead_code)]
     fn kind(&self) -> &'static str {
         match self {
             Msg::Binary(_) => "binary",
@@ -79,49 +81,81 @@ pub async fn start(upgrade: http::Upgrade, log: Logger) -> (Receiver<Msg>, Sende
 
     // Note: rx receive end, tx transmit end
     let (stream_rx, stream_tx) = io::split(upgrade.stream); // split incoming TcpStream into read and write half
-    let writer_tx = Writer::spawn(stream_tx, mask_frames, log.clone()); // handle write half
-    let socket_rx = Reader::spawn(stream_rx, writer_tx.clone(), deflate_supported, log); // handle read half
+    let (app_tx, ctl_tx) = Writer::spawn(stream_tx, mask_frames, log.clone()); // handle write half
+    let socket_rx = Reader::spawn(stream_rx, ctl_tx, deflate_supported, log); // handle read half
 
-    (socket_rx, writer_tx) // channel for communication with the upstream part
-                           // of the library
+    (socket_rx, app_tx) // channel for communication with the upstream part
+                        // of the library
 }
 
 // Writes bytes to the outbound tcp stream.
-struct Writer {}
+struct Writer {
+    stream_tx: WriteHalf<TcpStream>,
+    mask_frames: bool,
+    app_rx: Receiver<Msg>,
+    ctrl_rx: Receiver<Msg>,
+}
 
 impl Writer {
-    fn spawn(mut stream_tx: WriteHalf<TcpStream>, mask_frames: bool, log: Logger) -> Sender<Msg> {
-        let (tx, mut rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+    fn spawn(stream_tx: WriteHalf<TcpStream>, mask_frames: bool, log: Logger) -> (Sender<Msg>, Sender<Msg>) {
+        let (app_tx, app_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+        let (ctrl_tx, ctrl_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+
         spawn(async move {
-            'outer: while let Some(m) = rx.recv().await {
-                let close = m.is_close();
-                let kind = m.kind(); //.to_owned();
-                let raw_vec = m.into_raw(mask_frames);
-                let mut raw = raw_vec.as_slice();
-                trace!(log, "write"; "kind" => kind, "payload_len" => raw.len());
-                loop {
-                    match stream_tx.write(&raw).await {
-                        Err(e) => {
-                            error!(log, "{}", e);
-                            break 'outer;
-                        }
-                        Ok(n) => {
-                            if n == raw.len() {
-                                break; // done everything is written
-                            }
-                            raw = &raw[n..]; // resize, remove written leave
-                                             // unwritten and try again
-                        }
-                    }
-                }
-                if close {
-                    break;
-                }
+            let mut writer = Writer {
+                stream_tx: stream_tx,
+                mask_frames: mask_frames,
+                app_rx: app_rx,
+                ctrl_rx: ctrl_rx,
+            };
+
+            if let Err(e) = writer.run().await {
+                error!(log, "{}", e);
             }
             trace!(log, "writer loop closed");
         });
 
-        tx
+        (app_tx, ctrl_tx)
+    }
+
+    async fn run(&mut self) -> Result<(), Error> {
+        loop {
+            tokio::select! {
+                app = self.app_rx.recv() => {
+                    match app {
+                        Some(msg) => {
+                            self.write(msg).await?;
+                        },
+                        None => {
+                            // when the application writer goes out of scope
+                            self.write(Msg::Close(0)).await?;
+                            break;
+                        },
+                    }
+                },
+                Some(msg) = self.ctrl_rx.recv() => {
+                    self.write( msg).await?;
+                }
+                else => {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn write(&mut self, msg: Msg) -> Result<(), Error> {
+        let raw_vec = msg.into_raw(self.mask_frames);
+        let mut raw = raw_vec.as_slice();
+        loop {
+            let n = self.stream_tx.write(&raw).await?;
+            if n == raw.len() {
+                break;
+            }
+            // resize, remove written leave unwritten and try again
+            raw = &raw[n..];
+        }
+        Ok(())
     }
 }
 

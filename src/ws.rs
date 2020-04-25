@@ -138,7 +138,7 @@ impl<T: AsyncWriteExt + std::marker::Send + 'static> Writer<T> {
                     }
                 },
                 Some(msg) = self.ctrl_rx.recv() => {
-                    self.write( msg).await?;
+                    self.write(msg).await?;
                 }
                 else => {
                     break;
@@ -418,7 +418,7 @@ impl Frame {
 
     fn set_payload(&mut self, mut payload: Vec<u8>) {
         if self.mask {
-            payload = mask(payload, self.masking_key);
+            mask(&mut payload, self.masking_key);
         }
         self.payload = payload;
     }
@@ -557,13 +557,12 @@ impl Frame {
 //Converts masked data into unmasked data, or vice versa.
 //The same algorithm applies regardless of the direction of the translation,
 //e.g., the same steps are applied to ask the data as to unmask the data.
-fn mask(mut payload: Vec<u8>, key: [u8; 4]) -> Vec<u8> {
+fn mask(payload: &mut Vec<u8>, key: [u8; 4]) {
     // loop through the octets of ENCODED and XOR the octet with the (i modulo 4)th
     // octet of MASK ref: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers
     for (i, b) in payload.iter_mut().enumerate() {
         *b = *b ^ key[i % 4];
     }
-    payload
 }
 
 struct FrameWriter {
@@ -639,7 +638,7 @@ impl FrameWriter {
             buf[1] = buf[1] | 0b1000_0000u8; // set masking bit
             let masking_key = rand::thread_rng().gen::<[u8; 4]>(); // create key
             buf.extend_from_slice(&masking_key); // write key to msg
-            payload = mask(payload, masking_key) // mask payload
+            mask(&mut payload, masking_key) // mask payload
         }
         buf.extend_from_slice(payload.as_slice());
         buf

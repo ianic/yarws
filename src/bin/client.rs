@@ -9,6 +9,9 @@ struct Args {
 
     #[structopt(short = "r", long = "repeat", default_value = "0")] // <0 repeates forever
     repeat: isize,
+
+    #[structopt(short = "n", long = "no-wait")]
+    no_wait: bool,
 }
 
 // send different sizes of text messages to the echo server
@@ -37,7 +40,9 @@ async fn main() -> Result<(), Error> {
             break;
         }
         repeat -= 1;
-        delay_for(Duration::from_secs(1)).await;
+        if !args.no_wait {
+            delay_for(Duration::from_secs(1)).await;
+        }
     }
     Ok(())
 }

@@ -219,7 +219,7 @@ pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result
     }
     let upgrade = http::connect(stream, url).await?; // upgrade it from http to WebSocket
     let (rx, tx) = ws::start(upgrade.stream, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
-    Ok(Socket { no: 1, rx: rx, tx: tx })
+    Ok(Socket { rx, tx, no: 1 })
 }
 
 /// Represent a WebSocket connection. Used for sending and receiving messages.  
@@ -243,12 +243,33 @@ impl Socket {
     /// }
     /// ```
     pub async fn recv(&mut self) -> Option<Msg> {
+        Socket::recv_one(&mut self.rx, &mut self.tx, false).await
+    }
+
+    async fn recv_one(rx: &mut Receiver<ws::Msg>, tx: &mut Sender<ws::Msg>, text_only: bool) -> Option<Msg> {
         loop {
-            match self.rx.recv().await {
+            match rx.recv().await {
                 None => return None, // channel exhausted
-                Some(m) => match m.into_msg() {
-                    None => continue, // skip control message type
-                    Some(msg) => return Some(msg),
+                Some(ws_msg) => match ws_msg {
+                    ws::Msg::Text(text) => return Some(Msg::Text(text)),
+                    ws::Msg::Binary(payload) => {
+                        if text_only {
+                            // send close and return
+                            if let Err(_) = tx.send(ws::Msg::Close(0)).await {}
+                            return None;
+                        }
+                        return Some(Msg::Binary(payload));
+                    }
+                    ws::Msg::Close(_) => {
+                        if let Err(_) = tx.send(ws_msg).await {}
+                        return None;
+                    }
+                    ws::Msg::Ping(payload) => {
+                        if let Err(_) = tx.send(ws::Msg::Pong(payload)).await {
+                            return None;
+                        }
+                    }
+                    ws::Msg::Pong(_) => (),
                 },
             }
         }
@@ -283,12 +304,11 @@ impl Socket {
         let (mut i_tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
 
         let mut ws_rx = self.rx;
+        let mut ws_tx = self.tx.clone();
         spawn(async move {
-            while let Some(ws_msg) = ws_rx.recv().await {
-                if let Some(msg) = ws_msg.into_msg() {
-                    if let Err(_) = i_tx.send(msg).await {
-                        break;
-                    }
+            while let Some(msg) = Socket::recv_one(&mut ws_rx, &mut ws_tx, false).await {
+                if let Err(_) = i_tx.send(msg).await {
+                    break;
                 }
             }
         });
@@ -336,23 +356,22 @@ impl TextSocket {
     /// Receives String from the other side of the Socket connection.
     /// None is returned if the socket is closed.
     pub async fn recv(&mut self) -> Option<String> {
-        loop {
-            match self.rx.recv().await {
-                None => return None,
-                Some(m) => match m {
-                    ws::Msg::Text(text) => return Some(text),
-                    _ => continue, // ignore other type of the messages
-                },
-            }
-        }
+        TextSocket::recv_one(&mut self.rx, &mut self.tx).await
     }
 
     /// Sends String to the other side of the Socket connection.
     /// Errors if the socket is already closed.
-    pub async fn recv_one(&mut self) -> Result<String, Error> {
+    pub async fn try_recv(&mut self) -> Result<String, Error> {
         match self.recv().await {
             None => Err(Error::SocketClosed),
             Some(v) => Ok(v),
+        }
+    }
+
+    async fn recv_one(mut rx: &mut Receiver<ws::Msg>, mut tx: &mut Sender<ws::Msg>) -> Option<String> {
+        match Socket::recv_one(&mut rx, &mut tx, true).await {
+            Some(Msg::Text(text)) => return Some(text),
+            _ => None,
         }
     }
 
@@ -363,17 +382,11 @@ impl TextSocket {
         let (mut i_tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel(1);
 
         let mut ws_rx = self.rx;
+        let mut ws_tx = self.tx.clone();
         spawn(async move {
-            while let Some(ws_msg) = ws_rx.recv().await {
-                if let Some(msg) = ws_msg.into_msg() {
-                    match msg {
-                        Msg::Text(text) => {
-                            if let Err(_) = i_tx.send(text).await {
-                                break;
-                            }
-                        }
-                        _ => (),
-                    }
+            while let Some(text) = TextSocket::recv_one(&mut ws_rx, &mut ws_tx).await {
+                if let Err(_) = i_tx.send(text).await {
+                    break;
                 }
             }
         });

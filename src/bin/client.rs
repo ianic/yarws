@@ -32,7 +32,7 @@ async fn main() -> Result<(), Error> {
                 let req = &data.repeat(rep)[0..size];
 
                 socket.send(req).await?;
-                let rsp = socket.recv_one().await?;
+                let rsp = socket.try_recv().await?;
                 assert_eq!(req, rsp);
             }
         }

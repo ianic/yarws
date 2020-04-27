@@ -83,8 +83,8 @@ where
     trace!(log, "open");
     // Note: rx receive end, tx transmit end
     let (stream_rx, stream_tx) = io::split(stream); // split incoming TcpStream into read and write half
-    let (app_tx, ctl_tx) = Writer::spawn(stream_tx, mask_frames, log.clone()); // handle write half
-    let socket_rx = Reader::spawn(stream_rx, ctl_tx, deflate_supported, log); // handle read half
+    let app_tx = Writer::spawn(stream_tx, mask_frames, log.clone()); // handle write half
+    let socket_rx = Reader::spawn(stream_rx, deflate_supported, log); // handle read half
 
     (socket_rx, app_tx) // channel for communication with the upstream part
                         // of the library
@@ -98,19 +98,17 @@ where
     stream_tx: WriteHalf<T>,
     mask_frames: bool,
     app_rx: Receiver<Msg>,
-    ctrl_rx: Receiver<Msg>,
 }
 
 impl<T: AsyncWriteExt + std::marker::Send + 'static> Writer<T> {
-    fn spawn(stream_tx: WriteHalf<T>, mask_frames: bool, log: Logger) -> (Sender<Msg>, Sender<Msg>) {
+    fn spawn(stream_tx: WriteHalf<T>, mask_frames: bool, log: Logger) -> Sender<Msg> {
         let (app_tx, app_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
-        let (ctrl_tx, ctrl_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
+
         spawn(async move {
             let mut writer = Writer {
-                stream_tx: stream_tx,
-                mask_frames: mask_frames,
-                app_rx: app_rx,
-                ctrl_rx: ctrl_rx,
+                stream_tx,
+                mask_frames,
+                app_rx,
             };
 
             if let Err(e) = writer.run().await {
@@ -119,28 +117,23 @@ impl<T: AsyncWriteExt + std::marker::Send + 'static> Writer<T> {
             trace!(log, "writer loop closed");
         });
 
-        (app_tx, ctrl_tx)
+        app_tx
     }
 
     async fn run(&mut self) -> Result<(), Error> {
         loop {
-            tokio::select! {
-                app = self.app_rx.recv() => {
-                    match app {
-                        Some(msg) => {
-                            self.write(msg).await?;
-                        },
-                        None => {
-                            // when the application writer goes out of scope
-                            self.write(Msg::Close(0)).await?;
-                            break;
-                        },
-                    }
-                },
-                Some(msg) = self.ctrl_rx.recv() => {
+            let app = self.app_rx.recv().await;
+            match app {
+                Some(msg) => {
+                    let is_close = msg.is_close();
                     self.write(msg).await?;
+                    if is_close {
+                        break;
+                    }
                 }
-                else => {
+                None => {
+                    // when the application writer goes out of scope
+                    self.write(Msg::Close(0)).await?;
                     break;
                 }
             }
@@ -174,26 +167,19 @@ where
 {
     deflate_supported: bool,
     stream_rx: ReadHalf<T>,
-    control_tx: Sender<Msg>,
     tx: Sender<Msg>,
     log: slog::Logger,
     header_buf: [u8; 14],
 }
 
 impl<T: AsyncReadExt + std::marker::Send + 'static> Reader<T> {
-    fn spawn(
-        stream_rx: ReadHalf<T>,
-        control_tx: Sender<Msg>,
-        deflate_supported: bool,
-        log: slog::Logger,
-    ) -> Receiver<Msg> {
+    fn spawn(stream_rx: ReadHalf<T>, deflate_supported: bool, log: slog::Logger) -> Receiver<Msg> {
         let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
         let mut reader = Reader {
-            deflate_supported: deflate_supported,
-            stream_rx: stream_rx,
-            tx: tx,                 // output of the messages to the application
-            control_tx: control_tx, // signal for the write loop that reader is closed
-            log: log,
+            deflate_supported,
+            stream_rx,
+            tx, // output of the messages to the application
+            log,
             header_buf: [0u8; 14],
         };
 
@@ -269,13 +255,11 @@ impl<T: AsyncReadExt + std::marker::Send + 'static> Reader<T> {
             // process message
             trace!(self.log, "read" ;"opcode" =>  frame.opcode.desc(), "payload_len" => frame.payload_len, "header_len" => frame.header_len, "mask" => frame.mask);
             match frame.opcode.value() {
-                TEXT | BINARY => self.tx.send(frame.into_ws_msg()).await?,
-                PING => self.control_tx.send(frame.to_pong()).await?,
                 CLOSE => break frame.status(),
-                PONG | _ => (),
+                _ => self.tx.send(frame.into_ws_msg()).await?,
             }
         };
-        self.control_tx.send(Msg::Close(status)).await.unwrap_or_default();
+        self.tx.send(Msg::Close(status)).await.unwrap_or_default();
         trace!(self.log, "reader loop closed");
         Ok(())
     }
@@ -547,10 +531,6 @@ impl Frame {
             CLOSE => Msg::Close(self.status()),
             _ => Msg::Close(0),
         }
-    }
-
-    fn to_pong(self) -> Msg {
-        Msg::Pong(self.payload)
     }
 }
 

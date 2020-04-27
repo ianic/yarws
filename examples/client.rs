@@ -23,7 +23,7 @@ async fn main() -> Result<(), Error> {
         let req = &data.repeat(rep)[0..size];
 
         socket.send(req).await?; // send request
-        let rsp = socket.recv_one().await?; // receive response
+        let rsp = socket.try_recv().await?; // receive response
         assert_eq!(req, rsp);
     }
     Ok(())

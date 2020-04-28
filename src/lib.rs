@@ -192,6 +192,7 @@ extern crate hex_literal;
 
 mod http;
 pub mod log;
+mod stream;
 mod ws;
 
 /// Binds tcp listener to the provided addr (typically ip:port).  
@@ -214,11 +215,13 @@ pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result
     let stream = TcpStream::connect(&url.addr).await?; // establish tcp connection
     if url.wss {
         let upgrade = http::connect_tls(stream, url).await?; // upgrade it from http to WebSocket
-        let (rx, tx) = ws::start(upgrade.stream, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
-        return Ok(Socket { no: 1, rx: rx, tx: tx });
+        let strm = stream::Stream::new(upgrade.stream);
+        let (rx, tx) = ws::start(strm, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
+        return Ok(Socket { rx, tx, no: 1 });
     }
     let upgrade = http::connect(stream, url).await?; // upgrade it from http to WebSocket
-    let (rx, tx) = ws::start(upgrade.stream, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
+    let strm = stream::Stream::new(upgrade.stream);
+    let (rx, tx) = ws::start(strm, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
     Ok(Socket { rx, tx, no: 1 })
 }
 
@@ -471,8 +474,9 @@ async fn spawn_accept(stream: TcpStream, socket_tx: Sender<Socket>, no: usize, l
 // Socket through socket_tx channel.
 async fn accept(stream: TcpStream, mut socket_tx: Sender<Socket>, no: usize, log: Logger) -> Result<(), Error> {
     let upgrade = http::accept(stream).await?;
-    let (rx, tx) = ws::start(upgrade.stream, upgrade.client, upgrade.deflate_supported, log).await;
-    let socket = Socket { no: no, rx: rx, tx: tx };
+    let strm = stream::Stream::new(upgrade.stream);
+    let (rx, tx) = ws::start(strm, upgrade.client, upgrade.deflate_supported, log).await;
+    let socket = Socket { no, rx, tx };
     socket_tx.send(socket).await?;
     Ok(())
 }

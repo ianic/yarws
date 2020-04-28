@@ -1,3 +1,5 @@
+use super::stream;
+use super::stream::Stream;
 use super::Error;
 use inflate::inflate_bytes;
 use rand::Rng;
@@ -5,7 +7,6 @@ use slog::Logger;
 use std::fmt;
 use std::str;
 use tokio;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::prelude::*;
 use tokio::spawn;
 use tokio::sync::mpsc;
@@ -71,20 +72,20 @@ impl Msg {
     }
 }
 
-pub async fn start<T>(
-    stream: T,
+pub async fn start<R, W>(
+    stream: Stream<R, W>,
     mask_frames: bool,
     deflate_supported: bool,
     log: Logger,
 ) -> (Receiver<Msg>, Sender<Msg>)
 where
-    T: AsyncWriteExt + AsyncReadExt + std::marker::Send + 'static,
+    R: AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
+    W: AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
 {
     trace!(log, "open");
-    // Note: rx receive end, tx transmit end
-    let (stream_rx, stream_tx) = io::split(stream); // split incoming TcpStream into read and write half
-    let app_tx = Writer::spawn(stream_tx, mask_frames, log.clone()); // handle write half
-    let socket_rx = Reader::spawn(stream_rx, deflate_supported, log); // handle read half
+    // rx receive end, tx transmit end
+    let app_tx = Writer::spawn(stream.wh, mask_frames, log.clone()); // handle write half
+    let socket_rx = Reader::spawn(stream.rh, deflate_supported, log); // handle read half
 
     (socket_rx, app_tx) // channel for communication with the upstream part
                         // of the library
@@ -93,15 +94,15 @@ where
 // Writes bytes to the outbound tcp stream.
 struct Writer<T>
 where
-    T: AsyncWriteExt + std::marker::Send,
+    T: AsyncWrite + std::marker::Unpin + std::marker::Send,
 {
-    stream_tx: WriteHalf<T>,
+    stream_tx: stream::WriteHalf<T>,
     mask_frames: bool,
     app_rx: Receiver<Msg>,
 }
 
-impl<T: AsyncWriteExt + std::marker::Send + 'static> Writer<T> {
-    fn spawn(stream_tx: WriteHalf<T>, mask_frames: bool, log: Logger) -> Sender<Msg> {
+impl<T: AsyncWrite + std::marker::Unpin + std::marker::Send + 'static> Writer<T> {
+    fn spawn(stream_tx: stream::WriteHalf<T>, mask_frames: bool, log: Logger) -> Sender<Msg> {
         let (app_tx, app_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
 
         spawn(async move {
@@ -142,16 +143,8 @@ impl<T: AsyncWriteExt + std::marker::Send + 'static> Writer<T> {
     }
 
     async fn write(&mut self, msg: Msg) -> Result<(), Error> {
-        let raw_vec = msg.into_raw(self.mask_frames);
-        let mut raw = raw_vec.as_slice();
-        loop {
-            let n = self.stream_tx.write(&raw).await?;
-            if n == raw.len() {
-                break;
-            }
-            // resize, remove written leave unwritten and try again
-            raw = &raw[n..];
-        }
+        let raw: Vec<u8> = msg.into_raw(self.mask_frames);
+        self.stream_tx.write(&raw).await?;
         Ok(())
     }
 }
@@ -163,17 +156,17 @@ impl<T: AsyncWriteExt + std::marker::Send + 'static> Writer<T> {
 // of WebSocket (control_tx channel).
 struct Reader<T>
 where
-    T: AsyncReadExt + std::marker::Send,
+    T: AsyncRead + std::marker::Unpin + std::marker::Send,
 {
     deflate_supported: bool,
-    stream_rx: ReadHalf<T>,
+    stream_rx: stream::ReadHalf<T>,
     tx: Sender<Msg>,
     log: slog::Logger,
     header_buf: [u8; 14],
 }
 
-impl<T: AsyncReadExt + std::marker::Send + 'static> Reader<T> {
-    fn spawn(stream_rx: ReadHalf<T>, deflate_supported: bool, log: slog::Logger) -> Receiver<Msg> {
+impl<T: AsyncRead + std::marker::Unpin + std::marker::Send + 'static> Reader<T> {
+    fn spawn(stream_rx: stream::ReadHalf<T>, deflate_supported: bool, log: slog::Logger) -> Receiver<Msg> {
         let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
         let mut reader = Reader {
             deflate_supported,

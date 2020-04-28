@@ -38,7 +38,7 @@ pub async fn connect(mut stream: TcpStream, url: Url) -> Result<Upgrade<TcpStrea
     let header = read_header(&mut stream).await?;
     if header.is_valid_connect(&key) {
         return Ok(Upgrade {
-            stream: stream,
+            stream,
             deflate_supported: header.is_deflate_supported(),
             client: true,
         });
@@ -59,7 +59,7 @@ pub async fn connect_tls(std_stream: TcpStream, url: Url) -> Result<Upgrade<TlsS
     let header = read_header(&mut stream).await?;
     if header.is_valid_connect(&key) {
         return Ok(Upgrade {
-            stream: stream,
+            stream,
             deflate_supported: header.is_deflate_supported(),
             client: true,
         });

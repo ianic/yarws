@@ -1,6 +1,12 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2020-04-28
+### Added:
+- Buffered read. From [BufReader](https://docs.rs/tokio/0.2.19/tokio/io/struct.BufReader.html) docs: "It can be excessively inefficient to work directly with a AsyncRead instance. A BufReader performs large, infrequent reads on the underlying AsyncRead and maintains an in-memory buffer of the results." 
+In the previous implementation we were reading http header byte by byte, ws headers also few bytes at the time. Now we are using BufReader with buffer size of 1024, so number of system calls should be much lower.
+
+
 ## [0.2.0] - 2020-04-23
 ### Added:
 - Tls in connect. It is now possible to connect to the wss:// endpoints. Thanks to [mcseemk](https://www.reddit.com/r/rust/comments/g4zoip/ann_yet_another_rust_websocket_library_yarws/) for pointing  that.

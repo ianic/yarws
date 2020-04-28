@@ -1,23 +1,26 @@
 use tokio;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::prelude::*;
 
-pub struct Stream<R, W>
-where
-    R: AsyncRead + std::marker::Unpin,
-    W: AsyncWrite + std::marker::Unpin,
-{
+pub struct Stream<R, W> {
     pub rh: ReadHalf<R>,
     pub wh: WriteHalf<W>,
 }
 
-impl<R: AsyncRead + std::marker::Unpin, W: AsyncWrite + std::marker::Unpin> Stream<R, W> {
+impl<R, W> Stream<R, W>
+where
+    R: AsyncRead + std::marker::Unpin,
+    W: AsyncWrite + std::marker::Unpin,
+{
     pub fn new_from_halfs(rh: ReadHalf<R>, wh: WriteHalf<W>) -> Self {
         Self { rh, wh }
     }
 }
 
-impl<T: AsyncWrite + AsyncRead> Stream<io::ReadHalf<T>, io::WriteHalf<T>> {
+impl<T> Stream<io::ReadHalf<T>, io::WriteHalf<T>>
+where
+    T: AsyncWrite + AsyncRead,
+{
     pub fn new(stream: T) -> Stream<io::ReadHalf<T>, io::WriteHalf<T>> {
         let (stream_rh, stream_wh) = io::split(stream);
         let rh = ReadHalf::new(stream_rh);
@@ -30,14 +33,16 @@ pub struct ReadHalf<R> {
     inner: BufReader<R>,
 }
 
-impl<R: AsyncRead + std::marker::Unpin> ReadHalf<R> {
+impl<R> ReadHalf<R>
+where
+    R: AsyncRead + std::marker::Unpin,
+{
     pub fn new(inner: R) -> Self {
         Self {
             inner: BufReader::with_capacity(1024, inner),
         }
     }
 
-    #[allow(dead_code)]
     pub async fn http_header(&mut self) -> Result<Vec<String>, io::Error> {
         let mut res: Vec<String> = Vec::new();
         loop {
@@ -68,7 +73,10 @@ pub struct WriteHalf<W> {
     inner: W,
 }
 
-impl<W: AsyncWrite + std::marker::Unpin> WriteHalf<W> {
+impl<W> WriteHalf<W>
+where
+    W: AsyncWrite + std::marker::Unpin,
+{
     pub fn new(inner: W) -> Self {
         Self { inner }
     }

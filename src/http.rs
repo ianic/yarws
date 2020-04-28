@@ -5,8 +5,6 @@ use rand::Rng;
 use sha1::{Digest, Sha1};
 use std::str;
 use tokio;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-//use tokio::net::TcpStream;
 use tokio::prelude::*;
 
 // Accepts http upgrade requests.
@@ -14,8 +12,8 @@ use tokio::prelude::*;
 // Responds to client with http upgrade response.
 pub async fn accept<R, W>(mut stream: Stream<R, W>) -> Result<(Stream<R, W>, bool), Error>
 where
-    R: AsyncRead + std::marker::Unpin + std::marker::Send,
-    W: AsyncWrite + std::marker::Unpin + std::marker::Send,
+    R: AsyncRead + std::marker::Unpin,
+    W: AsyncWrite + std::marker::Unpin,
 {
     let lines = stream.rh.http_header().await?;
     let header = Header::from_lines(lines);
@@ -33,8 +31,8 @@ where
 // upgrade request is accepted.
 pub async fn connect<R, W>(mut stream: Stream<R, W>, url: &Url) -> Result<(Stream<R, W>, bool), Error>
 where
-    R: AsyncRead + std::marker::Unpin + std::marker::Send,
-    W: AsyncWrite + std::marker::Unpin + std::marker::Send,
+    R: AsyncRead + std::marker::Unpin,
+    W: AsyncWrite + std::marker::Unpin,
 {
     let key = connect_key();
     stream
@@ -48,16 +46,6 @@ where
         return Ok((stream, header.is_deflate_supported()));
     }
     Err(Error::InvalidUpgradeRequest)
-}
-
-#[derive(Debug)]
-pub struct Upgrade<T>
-where
-    T: AsyncWriteExt + AsyncReadExt + std::marker::Send,
-{
-    pub stream: T,
-    pub deflate_supported: bool,
-    pub client: bool,
 }
 
 #[derive(Debug)]

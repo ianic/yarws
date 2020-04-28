@@ -92,16 +92,16 @@ where
 }
 
 // Writes bytes to the outbound tcp stream.
-struct Writer<T>
-where
-    T: AsyncWrite + std::marker::Unpin + std::marker::Send,
-{
+struct Writer<T> {
     stream_tx: stream::WriteHalf<T>,
     mask_frames: bool,
     app_rx: Receiver<Msg>,
 }
 
-impl<T: AsyncWrite + std::marker::Unpin + std::marker::Send + 'static> Writer<T> {
+impl<T> Writer<T>
+where
+    T: AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+{
     fn spawn(stream_tx: stream::WriteHalf<T>, mask_frames: bool, log: Logger) -> Sender<Msg> {
         let (app_tx, app_rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
 
@@ -154,10 +154,7 @@ impl<T: AsyncWrite + std::marker::Unpin + std::marker::Send + 'static> Writer<T>
 // the Msg for communication with the application. Emits Msgs to the application
 // (tx channel), and in the case of control messages directly to the other side
 // of WebSocket (control_tx channel).
-struct Reader<T>
-where
-    T: AsyncRead + std::marker::Unpin + std::marker::Send,
-{
+struct Reader<T> {
     deflate_supported: bool,
     stream_rx: stream::ReadHalf<T>,
     tx: Sender<Msg>,
@@ -165,7 +162,10 @@ where
     header_buf: [u8; 14],
 }
 
-impl<T: AsyncRead + std::marker::Unpin + std::marker::Send + 'static> Reader<T> {
+impl<T> Reader<T>
+where
+    T: AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
+{
     fn spawn(stream_rx: stream::ReadHalf<T>, deflate_supported: bool, log: slog::Logger) -> Receiver<Msg> {
         let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel(1);
         let mut reader = Reader {

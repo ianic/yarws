@@ -170,16 +170,19 @@
 //! [autobahn]: https://github.com/crossbario/autobahn-testsuite
 //! [cargo-watch]: https://github.com/passcod/cargo-watch
 //! [Tokio]: https://tokio.rs
+use native_tls;
 use slog::Logger;
 use std::str;
 use tokio;
 use tokio::io;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::spawn;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio_tls::TlsStream;
 
 #[macro_use]
 extern crate slog;
@@ -194,6 +197,7 @@ mod http;
 pub mod log;
 mod stream;
 mod ws;
+use stream::Stream;
 
 /// Binds tcp listener to the provided addr (typically ip:port).  
 ///
@@ -212,17 +216,29 @@ pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<S
 pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
     let log = log.into().unwrap_or(log::null());
     let url = parse_url(url)?;
-    let stream = TcpStream::connect(&url.addr).await?; // establish tcp connection
+    let tcp_stream = TcpStream::connect(&url.addr).await?; // establish tcp connection
     if url.wss {
-        let upgrade = http::connect_tls(stream, url).await?; // upgrade it from http to WebSocket
-        let strm = stream::Stream::new(upgrade.stream);
-        let (rx, tx) = ws::start(strm, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
-        return Ok(Socket { rx, tx, no: 1 });
+        let tls_stream = connect_tls(tcp_stream, &url).await?; // tcp -> tls
+        return Ok(connect_stream(tls_stream, &url, log).await?);
     }
-    let upgrade = http::connect(stream, url).await?; // upgrade it from http to WebSocket
-    let strm = stream::Stream::new(upgrade.stream);
-    let (rx, tx) = ws::start(strm, upgrade.client, upgrade.deflate_supported, log.clone()).await; // start ws
-    Ok(Socket { rx, tx, no: 1 })
+    Ok(connect_stream(tcp_stream, &url, log).await?)
+}
+
+async fn connect_tls(tcp_stream: TcpStream, url: &Url) -> Result<TlsStream<TcpStream>, Error> {
+    let connector = native_tls::TlsConnector::new()?;
+    let connector = tokio_tls::TlsConnector::from(connector);
+    let stream = connector.connect(&url.domain, tcp_stream).await?;
+    Ok(stream)
+}
+
+async fn connect_stream<T>(raw_stream: T, url: &Url, log: Logger) -> Result<Socket, Error>
+where
+    T: AsyncWrite + AsyncRead + std::marker::Send + 'static,
+{
+    let stream = Stream::new(raw_stream);
+    let (stream, deflate_supported) = http::connect(stream, &url).await?; // upgrade tcp to ws
+    let (rx, tx) = ws::start(stream, true, deflate_supported, log.clone()).await; // start ws
+    return Ok(Socket { rx, tx, no: 1 });
 }
 
 /// Represent a WebSocket connection. Used for sending and receiving messages.  
@@ -472,11 +488,11 @@ async fn spawn_accept(stream: TcpStream, socket_tx: Sender<Socket>, no: usize, l
 
 // Upgrades tcp connection to the WebSocket, starts ws handler and returns new
 // Socket through socket_tx channel.
-async fn accept(stream: TcpStream, mut socket_tx: Sender<Socket>, no: usize, log: Logger) -> Result<(), Error> {
-    let upgrade = http::accept(stream).await?;
-    let strm = stream::Stream::new(upgrade.stream);
-    let (rx, tx) = ws::start(strm, upgrade.client, upgrade.deflate_supported, log).await;
-    let socket = Socket { no, rx, tx };
+async fn accept(tcp_stream: TcpStream, mut socket_tx: Sender<Socket>, no: usize, log: Logger) -> Result<(), Error> {
+    let stream = Stream::new(tcp_stream);
+    let (stream, deflate_supported) = http::accept(stream).await?;
+    let (rx, tx) = ws::start(stream, false, deflate_supported, log).await;
+    let socket = Socket { no, tx, rx };
     socket_tx.send(socket).await?;
     Ok(())
 }
@@ -506,6 +522,8 @@ pub enum Error {
     UrlParseError { url: String, error: url::ParseError },
     #[fail(display = "socket closed")]
     SocketClosed,
+    #[fail(display = "tls error: {}", error)]
+    TlsError { error: native_tls::Error },
 }
 
 impl From<io::Error> for Error {
@@ -532,6 +550,12 @@ impl From<mpsc::error::SendError<Socket>> for Error {
 impl From<std::str::Utf8Error> for Error {
     fn from(e: std::str::Utf8Error) -> Self {
         Error::TextPayloadNotValidUTF8(e)
+    }
+}
+
+impl From<native_tls::Error> for Error {
+    fn from(e: native_tls::Error) -> Self {
+        Error::TlsError { error: e }
     }
 }
 

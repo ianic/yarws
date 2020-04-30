@@ -3,6 +3,7 @@ use super::{Error, Url};
 use base64;
 use rand::Rng;
 use sha1::{Digest, Sha1};
+use std::collections::HashMap;
 use std::str;
 use tokio;
 use tokio::prelude::*;
@@ -29,7 +30,11 @@ where
 // Connects to the WebSocket server.
 // It will send http upgrade request, wait for response and check whether
 // upgrade request is accepted.
-pub async fn connect<R, W>(mut stream: Stream<R, W>, url: &Url) -> Result<(Stream<R, W>, bool), Error>
+pub async fn connect<R, W>(
+    mut stream: Stream<R, W>,
+    url: &Url,
+    headers: Option<HashMap<String, String>>,
+) -> Result<(Stream<R, W>, bool), Error>
 where
     R: AsyncRead + std::marker::Unpin,
     W: AsyncWrite + std::marker::Unpin,
@@ -37,7 +42,7 @@ where
     let key = connect_key();
     stream
         .wh
-        .write(connect_header(&url.addr, &url.path, &key).as_bytes())
+        .write(connect_header(&url.addr, &url.path, &key, headers).as_bytes())
         .await?;
 
     let lines = stream.rh.http_header().await?;
@@ -158,7 +163,7 @@ fn ws_accept(key: &str) -> String {
 }
 
 // Http header for client upgrade request to the WebSocket server.
-fn connect_header(host: &str, path: &str, key: &str) -> String {
+fn connect_header(host: &str, path: &str, key: &str, headers: Option<HashMap<String, String>>) -> String {
     let mut h = "GET ".to_owned()
         + path
         + " HTTP/1.1\r\n\
@@ -171,7 +176,16 @@ Sec-WebSocket-Key: ";
     h.push_str("\r\n");
     h.push_str("Host: ");
     h.push_str(host);
-    h.push_str("\r\n\r\n");
+    h.push_str("\r\n");
+    if let Some(headers) = headers {
+        for (key, value) in headers.iter() {
+            h.push_str(key);
+            h.push_str(": ");
+            h.push_str(value);
+            h.push_str("\r\n");
+        }
+    }
+    h.push_str("\r\n");
     h
 }
 
@@ -202,7 +216,7 @@ mod tests {
     fn test_connect_header() {
         let k = connect_key();
         assert_eq!(24, k.len());
-        let ch = connect_header("minus5.hr", "/ws", "mRfknYOIooirQK3OuKf54A==");
+        let ch = connect_header("minus5.hr", "/ws", "mRfknYOIooirQK3OuKf54A==", None);
         assert_eq!(
             ch,
             "GET /ws HTTP/1.1\r\n\
@@ -212,6 +226,21 @@ Sec-WebSocket-Version: 13\r\n\
 Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\
 Sec-WebSocket-Key: mRfknYOIooirQK3OuKf54A==\r\n\
 Host: minus5.hr\r\n\r\n"
+        );
+
+        let mut headers: HashMap<String, String> = HashMap::new();
+        headers.insert("Server".to_owned(), "yarws".to_owned());
+        let ch = connect_header("minus5.hr", "/ws", "mRfknYOIooirQK3OuKf54A==", Some(headers));
+        assert_eq!(
+            ch,
+            "GET /ws HTTP/1.1\r\n\
+Connection: Upgrade\r\n\
+Upgrade: websocket\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\
+Sec-WebSocket-Key: mRfknYOIooirQK3OuKf54A==\r\n\
+Host: minus5.hr\r\n\
+Server: yarws\r\n\r\n"
         );
     }
 

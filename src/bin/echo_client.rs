@@ -35,7 +35,7 @@ async fn main() {
 }
 
 async fn run(addr: &str) -> Result<(), Error> {
-    let mut socket = connect(addr, None).await?;
+    let mut socket = connect(addr).await?;
     while let Some(msg) = socket.recv().await {
         socket.send(msg).await?;
     }

@@ -1,5 +1,5 @@
 use structopt::StructOpt;
-use yarws::{connect, log, Error};
+use yarws::{connect, Error};
 
 #[derive(StructOpt, Debug)]
 struct Args {
@@ -13,10 +13,10 @@ struct Args {
 async fn main() -> Result<(), Error> {
     let args = Args::from_args();
     // connect to the server and switch to text only mode
-    let mut socket = connect(&args.url, log::config()).await?.into_text();
+    let mut socket = connect(&args.url).await?.into_text();
 
     let data = "01234567890abcdefghijklmnopqrstuvwxyz"; //36 characters
-    let sizes = vec![1, 36, 125, 126, 127, 65535, 65536, 65537, 1048576];
+    let sizes = vec![1, 36, 125, 126, 127];
     for size in sizes {
         // create request with `size` number of characters
         let rep = size / data.len() + 1;

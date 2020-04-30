@@ -1,3 +1,4 @@
 /target
 /autobahn/reports
 .vscode
+/src/bin/ss.rs

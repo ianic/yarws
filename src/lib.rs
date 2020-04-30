@@ -14,7 +14,7 @@
 //! # Examples
 //!
 //! ## Server:
-//! ```no-run
+//! ```
 //! let mut srv = yarws::bind("127.0.0.1:9001", None).await?;
 //! while let Some(socket) = srv.accept().await {
 //!     tokio::spawn(async move {
@@ -34,8 +34,8 @@
 //! [examples/echo_server.rs].
 //!
 //! ## Client:
-//! ```no-run
-//! let mut socket = yarws::connect("ws://127.0.0.1:9001", None).await?;
+//! ```
+//! let mut socket = yarws::connect("ws://127.0.0.1:9001").await?;
 //! while let Some(msg) = socket.recv().await {
 //!     socket.send(msg).await?;
 //! }
@@ -172,6 +172,7 @@
 //! [Tokio]: https://tokio.rs
 use native_tls;
 use slog::Logger;
+use std::collections::HashMap;
 use std::str;
 use tokio;
 use tokio::io;
@@ -213,15 +214,8 @@ pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<S
 }
 
 /// Connects to the WebSocket server and on success returns `Socket`.
-pub async fn connect<L: Into<Option<slog::Logger>>>(url: &str, log: L) -> Result<Socket, Error> {
-    let log = log.into().unwrap_or(log::null());
-    let url = parse_url(url)?;
-    let tcp_stream = TcpStream::connect(&url.addr).await?; // establish tcp connection
-    if url.wss {
-        let tls_stream = connect_tls(tcp_stream, &url).await?; // tcp -> tls
-        return Ok(connect_stream(tls_stream, &url, log).await?);
-    }
-    Ok(connect_stream(tcp_stream, &url, log).await?)
+pub async fn connect(url: &str) -> Result<Socket, Error> {
+    Ok(Client::new(url).connect().await?)
 }
 
 async fn connect_tls(tcp_stream: TcpStream, url: &Url) -> Result<TlsStream<TcpStream>, Error> {
@@ -231,14 +225,97 @@ async fn connect_tls(tcp_stream: TcpStream, url: &Url) -> Result<TlsStream<TcpSt
     Ok(stream)
 }
 
-async fn connect_stream<T>(raw_stream: T, url: &Url, log: Logger) -> Result<Socket, Error>
+async fn connect_stream<T>(
+    raw_stream: T,
+    url: &Url,
+    headers: Option<HashMap<String, String>>,
+    log: Logger,
+) -> Result<Socket, Error>
 where
     T: AsyncWrite + AsyncRead + std::marker::Send + 'static,
 {
     let stream = Stream::new(raw_stream);
-    let (stream, deflate_supported) = http::connect(stream, &url).await?; // upgrade tcp to ws
+    let (stream, deflate_supported) = http::connect(stream, &url, headers).await?; // upgrade tcp to ws
     let (rx, tx) = ws::start(stream, true, deflate_supported, log.clone()).await; // start ws
     return Ok(Socket { rx, tx, no: 1 });
+}
+
+/// Creates WebSocket client side of the connection.
+///
+/// Uses [builder] pattern for configuring client.
+/// Start with new set options and finish with connect.
+/// ```
+//  let url = "wss://echo.websocket.org";
+/// let mut socket = yarws::Client::new(url)
+///        .defaultlogger()
+///        .cookie("session_id", "1266DE23-C5F4-4AA8-4684-2A417B899421")
+///        .header("Origin", "https://websocket.org")
+///        .connect()
+///        .await?
+///        .into_text();
+/// ```
+/// [builder]: https://doc.rust-lang.org/1.0.0/style/ownership/builders.html
+pub struct Client {
+    url: String,
+    log: Logger,
+    headers: HashMap<String, String>,
+    cookies: HashMap<String, String>,
+}
+
+impl Client {
+    pub fn new(url: &str) -> Self {
+        Client {
+            url: url.to_owned(),
+            log: log::null(),
+            headers: HashMap::new(),
+            cookies: HashMap::new(),
+        }
+    }
+
+    pub fn default_logger(mut self) -> Client {
+        self.log = log::config();
+        self
+    }
+
+    pub fn logger(mut self, log: Logger) -> Client {
+        self.log = log;
+        self
+    }
+
+    pub fn header(mut self, key: &str, value: &str) -> Client {
+        self.headers.insert(key.to_owned(), value.to_owned());
+        self
+    }
+
+    pub fn cookie(mut self, key: &str, value: &str) -> Client {
+        self.cookies.insert(key.to_owned(), value.to_owned());
+        self
+    }
+
+    fn cookies_to_header(&mut self) {
+        if self.cookies.len() == 0 {
+            return;
+        }
+        let mut cookie = String::new();
+        for (key, value) in self.cookies.iter() {
+            cookie.push_str(&key);
+            cookie.push_str("=");
+            cookie.push_str(&value);
+            cookie.push_str("; ");
+        }
+        self.headers.insert("Cookie".to_owned(), cookie);
+    }
+
+    pub async fn connect(mut self) -> Result<Socket, Error> {
+        self.cookies_to_header();
+        let url = parse_url(&self.url)?;
+        let tcp_stream = TcpStream::connect(&url.addr).await?; // establish tcp connection
+        if url.wss {
+            let tls_stream = connect_tls(tcp_stream, &url).await?; // tcp -> tls
+            return Ok(connect_stream(tls_stream, &url, Some(self.headers), self.log).await?);
+        }
+        Ok(connect_stream(tcp_stream, &url, Some(self.headers), self.log).await?)
+    }
 }
 
 /// Represent a WebSocket connection. Used for sending and receiving messages.  
@@ -256,7 +333,7 @@ impl Socket {
     /// # Examples
     ///
     /// Usually used in while loop:
-    /// ```no-run
+    /// ```
     /// while let Some(msg) = socket.recv().await {
     ///     // process msg
     /// }
@@ -300,7 +377,7 @@ impl Socket {
     /// # Examples
     /// Echo example.
     /// Receive Msgs and replay with the same Msg.
-    /// ```no-run
+    /// ```
     /// async fn echo(mut socket: Socket) -> Result<(), Error> {
     ///     while let Some(msg) = socket.recv().await {
     ///         socket.send(msg).await?;

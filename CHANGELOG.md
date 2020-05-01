@@ -2,6 +2,10 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.3.1] - 2020-05-01
+### Added: 
+- HTTP headers are now [visible](https://github.com/ianic/yarws/blob/ac3a1662d361b904ff6b2810349470ca92acc0c1/src/lib.rs#L333) after successful client or server connection.
+
 ## [0.3.0] - 2020-05-01
 ### Added: 
 - Setting custom http headers and cookies on Client.

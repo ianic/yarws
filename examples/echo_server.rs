@@ -1,7 +1,7 @@
 use structopt::StructOpt;
 use tokio;
 use tokio::spawn;
-use yarws::{bind, log, Error, Socket};
+use yarws::{log, Error, Server, Socket};
 
 #[macro_use]
 extern crate slog;
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Error> {
     let log = log::config();
 
     // bind to tcp port
-    let mut srv = bind(&args.addr(), log.clone()).await?;
+    let mut srv = Server::new(&args.addr()).logger(log.clone()).bind().await?;
     // wait for incoming connection
     while let Some(socket) = srv.accept().await {
         let log = log.new(o!("conn" => socket.no));

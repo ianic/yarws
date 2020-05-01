@@ -3,7 +3,7 @@ use tokio;
 use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use yarws::{bind, Error, TextSocket};
+use yarws::{Error, Server, TextSocket};
 
 #[macro_use]
 extern crate slog;
@@ -42,7 +42,7 @@ async fn main() {
 }
 
 async fn run(addr: &str, log: slog::Logger) -> Result<(), Error> {
-    let mut srv = bind(addr, log.clone()).await?;
+    let mut srv = Server::new(addr).logger(log).bind().await?;
     let chat_tx = chat().await;
 
     while let Some(socket) = srv.accept().await {

@@ -205,12 +205,8 @@ use stream::Stream;
 /// Errors if binding can't be started. In most cases because port is
 /// already used, but other errors could occur also; too many open files,
 /// incorrect addr.
-pub async fn bind<L: Into<Option<slog::Logger>>>(addr: &str, log: L) -> Result<Server, Error> {
-    let log = log.into().unwrap_or(log::null());
-    let listener = TcpListener::bind(addr).await?;
-    Ok(Server {
-        rx: Server::listen(listener, log).await,
-    })
+pub async fn bind(addr: &str) -> Result<Listener, Error> {
+    Ok(Server::new(addr).bind().await?)
 }
 
 /// Connects to the WebSocket server and on success returns `Socket`.
@@ -521,10 +517,45 @@ impl Msg {
 
 /// For creating WebSocket servers.
 pub struct Server {
-    rx: Receiver<Socket>,
+    addr: String,
+    log: Logger,
 }
 
 impl Server {
+    pub fn new(addr: &str) -> Self {
+        Server {
+            addr: addr.to_owned(),
+            log: log::null(),
+        }
+    }
+
+    pub fn default_logger(mut self) -> Server {
+        self.log = log::config();
+        self
+    }
+
+    pub fn logger(mut self, log: Logger) -> Server {
+        self.log = log;
+        self
+    }
+
+    pub async fn bind(self) -> Result<Listener, Error> {
+        let listener = TcpListener::bind(self.addr).await?;
+        Ok(Listener::new(listener, self.log).await)
+    }
+}
+
+pub struct Listener {
+    rx: Receiver<Socket>,
+}
+
+impl Listener {
+    async fn new(listener: TcpListener, log: Logger) -> Self {
+        Listener {
+            rx: Listener::listen(listener, log).await,
+        }
+    }
+
     /// Returns `Socket` for successfully established WebSocket connection.
     /// Loop over this method to handle all incoming connections.  
     pub async fn accept(&mut self) -> Option<Socket> {

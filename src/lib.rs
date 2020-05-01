@@ -15,18 +15,23 @@
 //!
 //! ## Server:
 //! ```
-//! let mut srv = yarws::bind("127.0.0.1:9001", None).await?;
-//! while let Some(socket) = srv.accept().await {
-//!     tokio::spawn(async move {
-//!         while let Some(msg) = socket.recv().await {
-//!             socket.send(msg).await.unwrap();
-//!         }
-//!     }
-//! }
+//! # use yarws::{bind, Error};
+//! # async fn server() -> Result<(), Error> {
+//!     let addr = "127.0.0.1:9001";
+//!     let mut srv = bind(addr).await?;
+//!     while let Some(mut socket) = srv.accept().await {
+//!         tokio::spawn(async move {
+//!             while let Some(msg) = socket.recv().await {
+//!                 socket.send(msg).await.unwrap();
+//!             }
+//!         });
+//!     };
+//! #    Ok(())
+//! # }
 //! ```
 //! This is an example of echo server. We are replying with the same message on
 //! each incoming message.  
-//! First line starts listening for WebSocket connections on an ip:port.  
+//! Second line starts listening for WebSocket connections on an ip:port.  
 //! Each client is represented by [`Socket`] returned from [`accept`].  
 //! For each client we are looping while messages arrive and replying with the
 //! same message.  
@@ -35,10 +40,15 @@
 //!
 //! ## Client:
 //! ```
-//! let mut socket = yarws::connect("ws://127.0.0.1:9001").await?;
-//! while let Some(msg) = socket.recv().await {
-//!     socket.send(msg).await?;
-//! }
+//! # use yarws::{connect, Error};
+//! # async fn client() -> Result<(), Error> {
+//!     let url = "ws://127.0.0.1:9001";
+//!     let mut socket = connect(url).await?;
+//!     while let Some(msg) = socket.recv().await {
+//!         socket.send(msg).await?;
+//!     }
+//! #    Ok(())
+//! # }
 //! ```
 //! This is example of an echo client.  
 //! [`connect`] method returns [`Socket`] which is used to send and receive
@@ -241,14 +251,18 @@ where
 /// Uses [builder] pattern for configuring client.
 /// Start with new set options and finish with connect.
 /// ```
-//  let url = "wss://echo.websocket.org";
-/// let mut socket = yarws::Client::new(url)
-///        .defaultlogger()
-///        .cookie("session_id", "1266DE23-C5F4-4AA8-4684-2A417B899421")
-///        .header("Origin", "https://websocket.org")
-///        .connect()
-///        .await?
-///        .into_text();
+/// # use yarws::{Client, Error};
+/// # async fn client() -> Result<(), Error> {
+///     let url = "wss://echo.websocket.org";
+///     let mut socket = Client::new(url)
+///         .default_logger()
+///         .cookie("session_id", "1266DE23-C5F4-4AA8-4684-2A417B899421")
+///         .header("Origin", "https://websocket.org")
+///         .connect()
+///         .await?
+///         .into_text();
+/// #    Ok(())
+/// # }
 /// ```
 /// [builder]: https://doc.rust-lang.org/1.0.0/style/ownership/builders.html
 pub struct Client {
@@ -330,9 +344,15 @@ impl Socket {
     ///
     /// Usually used in while loop:
     /// ```
-    /// while let Some(msg) = socket.recv().await {
-    ///     // process msg
-    /// }
+    /// # use yarws::{connect, Error};
+    /// # async fn client() -> Result<(), Error> {
+    /// #    let url = "ws://127.0.0.1:9001";
+    /// #    let mut socket = connect(url).await?;
+    ///     while let Some(msg) = socket.recv().await {
+    ///         // process msg
+    ///     }
+    /// #    Ok(())
+    /// # }
     /// ```
     pub async fn recv(&mut self) -> Option<Msg> {
         Socket::recv_one(&mut self.rx, &mut self.tx, false).await
@@ -374,6 +394,7 @@ impl Socket {
     /// Echo example.
     /// Receive Msgs and replay with the same Msg.
     /// ```
+    /// # use yarws::{Socket, Error};
     /// async fn echo(mut socket: Socket) -> Result<(), Error> {
     ///     while let Some(msg) = socket.recv().await {
     ///         socket.send(msg).await?;

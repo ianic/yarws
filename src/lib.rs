@@ -15,11 +15,11 @@
 //!
 //! ## Server:
 //! ```
-//! # use yarws::{bind, Error};
+//! # use yarws::{Server, Error};
 //! # async fn server() -> Result<(), Error> {
 //!     let addr = "127.0.0.1:9001";
-//!     let mut srv = bind(addr).await?;
-//!     while let Some(mut socket) = srv.accept().await {
+//!     let mut listener = Server::new(addr).bind().await?;
+//!     while let Some(mut socket) = listener.accept().await {
 //!         tokio::spawn(async move {
 //!             while let Some(msg) = socket.recv().await {
 //!                 socket.send(msg).await.unwrap();
@@ -40,10 +40,10 @@
 //!
 //! ## Client:
 //! ```
-//! # use yarws::{connect, Error};
+//! # use yarws::{Client, Error};
 //! # async fn client() -> Result<(), Error> {
 //!     let url = "ws://127.0.0.1:9001";
-//!     let mut socket = connect(url).await?;
+//!     let mut socket = Client::new(url).connect().await?;
 //!     while let Some(msg) = socket.recv().await {
 //!         socket.send(msg).await?;
 //!     }
@@ -210,11 +210,7 @@ mod stream;
 mod ws;
 use stream::Stream;
 
-/// Binds tcp listener to the provided addr (typically ip:port).  
-///
-/// Errors if binding can't be started. In most cases because port is
-/// already used, but other errors could occur also; too many open files,
-/// incorrect addr.
+/// Binds tcp listener to the provided addr (ip:port).
 pub async fn bind(addr: &str) -> Result<Listener, Error> {
     Ok(Server::new(addr).bind().await?)
 }
@@ -344,10 +340,10 @@ impl Socket {
     ///
     /// Usually used in while loop:
     /// ```
-    /// # use yarws::{connect, Error};
+    /// # use yarws::{Client, Error};
     /// # async fn client() -> Result<(), Error> {
     /// #    let url = "ws://127.0.0.1:9001";
-    /// #    let mut socket = connect(url).await?;
+    /// #    let mut socket = Client::new(url).connect().await?;
     ///     while let Some(msg) = socket.recv().await {
     ///         // process msg
     ///     }
@@ -536,7 +532,46 @@ impl Msg {
     }
 }
 
-/// For creating WebSocket servers.
+/// Creates server side of the WebSocket connection.
+///
+/// Errors if binding can't be started. In most cases because port is
+/// already used, but other errors could occur also; too many open files,
+/// incorrect addr.
+///
+/// # Examples
+/// ## create listener
+/// Uses [builder] pattern for setting options.
+/// Start with new set options and finish with bind.
+/// ```
+/// # use yarws::{Server, Error, log};
+/// # async fn client() -> Result<(), Error> {
+/// #   let log = log::config();
+///     let addr = "localhost:9001";
+///     let mut listener = Server::new(addr)
+///         .logger(log)
+///         .bind()
+///         .await?;
+/// #    Ok(())
+/// # }
+/// ```
+/// ## accept connections
+/// ```
+/// # use yarws::{Server, Error};
+/// # async fn server() -> Result<(), Error> {
+/// #    let addr = "127.0.0.1:9001";
+/// #    let mut listener = Server::new(addr).bind().await?;
+///     while let Some(mut socket) = listener.accept().await {
+///         tokio::spawn(async move {
+///              // handle socket
+/// #            while let Some(msg) = socket.recv().await {
+/// #                socket.send(msg).await.unwrap();
+/// #            }
+///         });
+///     };
+/// #    Ok(())
+/// # }
+/// ```
+/// [builder]: https://doc.rust-lang.org/1.0.0/style/ownership/builders.html
 pub struct Server {
     addr: String,
     log: Logger,
@@ -566,6 +601,9 @@ impl Server {
     }
 }
 
+/// Accepts WebSocket connections, creates [`Socket`] for each.
+///
+/// [`Socket`]: struct.Socket.html
 pub struct Listener {
     rx: Receiver<Socket>,
 }
@@ -579,6 +617,21 @@ impl Listener {
 
     /// Returns `Socket` for successfully established WebSocket connection.
     /// Loop over this method to handle all incoming connections.  
+    /// # Examples
+    /// ```
+    /// # use yarws::{Server, Error};
+    /// # async fn server() -> Result<(), Error> {
+    /// #    let addr = "127.0.0.1:9001";
+    /// #    let mut listener = Server::new(addr).bind().await?;
+    ///     while let Some(mut socket) = listener.accept().await {
+    /// #        tokio::spawn(async move {
+    /// #            while let Some(msg) = socket.recv().await {
+    /// #                socket.send(msg).await.unwrap();
+    /// #            }
+    /// #        });
+    ///     };
+    /// #    Ok(())
+    /// # }    
     pub async fn accept(&mut self) -> Option<Socket> {
         self.rx.recv().await
     }

@@ -17,18 +17,19 @@ uncompressed.
 
 ### Server:
 ```rust
-let mut srv = yarws::bind("127.0.0.1:9001", None).await?;
-while let Some(socket) = srv.accept().await {
-    tokio::spawn(async move {
-        while let Some(msg) = socket.recv().await {
-            socket.send(msg).await.unwrap();
-        }
-    }
-}
+    let addr = "127.0.0.1:9001";
+    let mut listener = Server::new(addr).bind().await?;
+    while let Some(mut socket) = listener.accept().await {
+        tokio::spawn(async move {
+            while let Some(msg) = socket.recv().await {
+                socket.send(msg).await.unwrap();
+            }
+        });
+    };
 ```
 This is an example of echo server. We are replying with the same message on
 each incoming message.
-First line starts listening for WebSocket connections on an ip:port.
+Second line starts listening for WebSocket connections on an ip:port.
 Each client is represented by [`Socket`] returned from [`accept`].
 For each client we are looping while messages arrive and replying with the
 same message.
@@ -37,10 +38,11 @@ For the complete echo server example please take a look at
 
 ### Client:
 ```rust
-let mut socket = yarws::connect("ws://127.0.0.1:9001", None).await?;
-while let Some(msg) = socket.recv().await {
-    socket.send(msg).await?;
-}
+    let url = "ws://127.0.0.1:9001";
+    let mut socket = Client::new(url).connect().await?;
+    while let Some(msg) = socket.recv().await {
+        socket.send(msg).await?;
+    }
 ```
 This is example of an echo client.
 [`connect`] method returns [`Socket`] which is used to send and receive

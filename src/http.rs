@@ -11,16 +11,16 @@ use tokio::prelude::*;
 // Accepts http upgrade requests.
 // Parses http headers. Checks weather it is valid WebSocket upgrade request.
 // Responds to client with http upgrade response.
-pub async fn accept<R, W>(mut stream: Stream<R, W>) -> Result<(Stream<R, W>, bool), Error>
+pub async fn accept<R, W>(mut stream: Stream<R, W>) -> Result<(Stream<R, W>, bool, HashMap<String, String>), Error>
 where
     R: AsyncRead + std::marker::Unpin,
     W: AsyncWrite + std::marker::Unpin,
 {
     let lines = stream.rh.http_header().await?;
-    let header = Header::from_lines(lines);
+    let header = Header::from_lines(&lines);
     if header.is_valid_upgrade() {
         stream.wh.write(header.upgrade_response().as_bytes()).await?;
-        return Ok((stream, header.is_deflate_supported()));
+        return Ok((stream, header.is_deflate_supported(), header.lines));
     }
     const BAD_REQUEST_HTTP_RESPONSE: &[u8] = "HTTP/1.1 400 Bad Request\r\n\r\n".as_bytes();
     stream.wh.write(BAD_REQUEST_HTTP_RESPONSE).await?;
@@ -34,7 +34,7 @@ pub async fn connect<R, W>(
     mut stream: Stream<R, W>,
     url: &Url,
     headers: Option<HashMap<String, String>>,
-) -> Result<(Stream<R, W>, bool), Error>
+) -> Result<(Stream<R, W>, bool, HashMap<String, String>), Error>
 where
     R: AsyncRead + std::marker::Unpin,
     W: AsyncWrite + std::marker::Unpin,
@@ -46,9 +46,9 @@ where
         .await?;
 
     let lines = stream.rh.http_header().await?;
-    let header = Header::from_lines(lines);
+    let header = Header::from_lines(&lines);
     if header.is_valid_connect(&key) {
-        return Ok((stream, header.is_deflate_supported()));
+        return Ok((stream, header.is_deflate_supported(), header.lines));
     }
     Err(Error::InvalidUpgradeRequest)
 }
@@ -61,6 +61,7 @@ struct Header {
     key: String,
     extensions: String,
     accept: String,
+    lines: HashMap<String, String>,
 }
 
 impl Header {
@@ -72,10 +73,11 @@ impl Header {
             key: String::new(),
             extensions: String::new(),
             accept: String::new(),
+            lines: HashMap::new(),
         }
     }
 
-    fn from_lines(lines: Vec<String>) -> Self {
+    fn from_lines(lines: &Vec<String>) -> Self {
         let mut header = Header::new();
         for line in lines {
             header.append(&line);
@@ -85,6 +87,7 @@ impl Header {
 
     fn append(&mut self, line: &str) {
         if let Some((key, value)) = split_header_line(&line) {
+            self.lines.insert(key.to_owned(), value.to_owned());
             match key.to_lowercase().as_str() {
                 "connection" => self.connection = value.to_lowercase(),
                 "upgrade" => self.upgrade = value.to_lowercase(),

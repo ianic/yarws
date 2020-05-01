@@ -1,6 +1,6 @@
 use structopt::StructOpt;
 use tokio::time::{delay_for, Duration};
-use yarws::Error;
+use yarws::{Client, Error};
 
 #[derive(StructOpt, Debug)]
 struct Args {
@@ -23,11 +23,12 @@ async fn main() -> Result<(), Error> {
     let mut repeat = args.repeat;
     loop {
         {
-            let mut socket = yarws::Client::new(&args.url)
-                .default_logger()
-                .connect()
-                .await?
-                .into_text();
+            let mut socket = Client::new(&args.url).default_logger().connect().await?.into_text();
+
+            // show headers
+            // for (key, value) in socket.headers.iter() {
+            //     println!("{}: {}", key, value)
+            // }
 
             let data = "01234567890abcdefghijklmnopqrstuvwxyz"; //36 characters
             let sizes = vec![1, 36, 125, 126, 127, 65535, 65536, 65537, 1048576];

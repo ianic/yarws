@@ -237,9 +237,9 @@ where
     T: AsyncWrite + AsyncRead + std::marker::Send + 'static,
 {
     let stream = Stream::new(raw_stream);
-    let (stream, deflate_supported) = http::connect(stream, &url, headers).await?; // upgrade tcp to ws
+    let (stream, deflate_supported, headers) = http::connect(stream, &url, headers).await?; // upgrade tcp to ws
     let (rx, tx) = ws::start(stream, true, deflate_supported, log.clone()).await; // start ws
-    return Ok(Socket { rx, tx, no: 1 });
+    return Ok(Socket { rx, tx, no: 1, headers });
 }
 
 /// Creates WebSocket client side of the connection.
@@ -330,6 +330,7 @@ pub struct Socket {
     pub no: usize,
     tx: Sender<ws::Msg>,
     rx: Receiver<ws::Msg>,
+    pub headers: HashMap<String, String>,
 }
 
 impl Socket {
@@ -441,6 +442,7 @@ impl Socket {
             no: self.no,
             tx: self.tx,
             rx: self.rx,
+            headers: self.headers,
         }
     }
 }
@@ -454,6 +456,7 @@ pub struct TextSocket {
     pub no: usize,
     tx: Sender<ws::Msg>,
     rx: Receiver<ws::Msg>,
+    pub headers: HashMap<String, String>,
 }
 
 impl TextSocket {
@@ -672,9 +675,9 @@ async fn spawn_accept(stream: TcpStream, socket_tx: Sender<Socket>, no: usize, l
 // Socket through socket_tx channel.
 async fn accept(tcp_stream: TcpStream, mut socket_tx: Sender<Socket>, no: usize, log: Logger) -> Result<(), Error> {
     let stream = Stream::new(tcp_stream);
-    let (stream, deflate_supported) = http::accept(stream).await?;
+    let (stream, deflate_supported, headers) = http::accept(stream).await?;
     let (rx, tx) = ws::start(stream, false, deflate_supported, log).await;
-    let socket = Socket { no, tx, rx };
+    let socket = Socket { no, tx, rx, headers };
     socket_tx.send(socket).await?;
     Ok(())
 }

@@ -741,6 +741,7 @@ impl From<native_tls::Error> for Error {
     }
 }
 
+#[doc(hidden)]
 pub struct Url {
     addr: String,
     path: String,

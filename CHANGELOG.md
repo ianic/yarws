@@ -1,6 +1,16 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+
+## [0.3.0] - 2020-05-01
+### Added: 
+- Setting custom http headers and cookies on Client.
+- [Builder](https://doc.rust-lang.org/1.0.0/style/ownership/builders.html) pattern for setting options while creating both Server and Client.
+
+### Fixed:
+- All documentation examples are now runnable.
+- Project has [roadmap](https://github.com/ianic/yarws/projects/1) now.
+
 ## [0.2.1] - 2020-04-28
 ### Added:
 - Buffered read. From [BufReader](https://docs.rs/tokio/0.2.19/tokio/io/struct.BufReader.html) docs: "It can be excessively inefficient to work directly with a AsyncRead instance. A BufReader performs large, infrequent reads on the underlying AsyncRead and maintains an in-memory buffer of the results." 
